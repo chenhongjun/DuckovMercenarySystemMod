@@ -1,0 +1,87 @@
+《逃离鸭科夫》DuckovMercenarySystemMod - 快速开始指南
+================================================
+
+📦 第一步：配置项目
+-----------------
+1. 用文本编辑器或Visual Studio打开 DuckovMercenarySystemMod.csproj 文件
+2. 找到这一行：
+   <DuckovPath>E:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov</DuckovPath>
+3. 修改为你的游戏安装路径（包含 Duckov.exe 的文件夹）
+
+🔨 第二步：编译项目
+-----------------
+方式A - 使用快速构建脚本（推荐）：
+  双击运行 "快速构建.bat"
+
+方式B - 使用命令行：
+  在当前目录打开命令提示符，运行：
+  dotnet build DuckovMercenarySystemMod.sln -c Release
+
+方式C - 使用Visual Studio：
+  1. 双击打开 DuckovMercenarySystemMod.sln
+  2. 在顶部工具栏选择 "Release" 配置
+  3. 点击 "生成" -> "生成解决方案"
+
+📋 第三步：准备发布文件
+---------------------
+编译成功后：
+1. 编译好的DLL文件会自动复制到 ReleaseExample\DuckovMercenarySystemMod\ 目录
+2. （可选）准备一个 256x256 的 preview.png 图片，放到该目录
+
+🎮 第四步：安装到游戏
+-------------------
+1. 找到游戏安装目录下的 Duckov_Data\Mods\ 文件夹
+   （如果没有Mods文件夹，请手动创建）
+
+2. 将 ReleaseExample\DuckovMercenarySystemMod\ 整个文件夹复制到 Mods 目录下
+   
+   最终结构应该是：
+   <游戏目录>\Duckov_Data\Mods\DuckovMercenarySystemMod\
+       ├── DuckovMercenarySystemMod.dll
+       ├── info.ini
+       └── preview.png (可选)
+
+3. 启动游戏
+
+4. 在主菜单点击 "Mods"
+
+5. 找到 "雇佣兵系统Mod"，勾选启用
+
+6. 重启游戏或开始新游戏
+
+🎯 第五步：测试Mod
+-----------------
+进入游戏后：
+- 等待3秒，会看到欢迎消息气泡
+- 按 F9 键：获得一个Glick物品
+- 按 F10 键：显示随机对话气泡
+
+💡 开发调试
+-----------
+查看日志文件：
+%AppData%\..\LocalLow\TeamSoda\Duckov\Player.log
+
+修改代码后：
+1. 重新编译
+2. 将新的DLL复制到游戏Mods目录（覆盖旧文件）
+3. 在游戏Mods菜单中禁用后重新启用，或重启游戏
+
+❓ 常见问题
+-----------
+Q: 编译时提示找不到引用的DLL？
+A: 检查 .csproj 文件中的 <DuckovPath> 是否正确
+
+Q: 游戏中看不到Mod？
+A: 确认文件夹名称、info.ini的name参数、命名空间都是 "DuckovMercenarySystemMod"
+
+Q: Mod无法启用？
+A: 查看日志文件，检查是否有错误信息
+
+📚 更多信息
+-----------
+详细文档请查看：README.md
+API参考：../Documents/NotableAPIs_CN.md
+
+================================================
+祝开发愉快！🦆
+

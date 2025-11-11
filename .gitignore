@@ -1,0 +1,19 @@
+# Build results
+bin/
+obj/
+
+# Visual Studio files
+.vs/
+*.user
+*.suo
+
+# Rider
+.idea/
+
+# Mac
+.DS_Store
+
+# Temp files
+*.tmp
+*.bak
+
