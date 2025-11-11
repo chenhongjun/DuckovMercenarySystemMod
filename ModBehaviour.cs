@@ -90,7 +90,7 @@ namespace DuckovMercenarySystemMod
             {
                 AddTestMoney();
             }
-            
+            /*
             // F8键 - 打印友军的所有组件列表
             if (Input.GetKeyDown(KeyCode.F8))
             {
@@ -120,7 +120,7 @@ namespace DuckovMercenarySystemMod
             {
                 ExploreItemClass();
             }
-            
+            */
             // 更新友军跟随
             UpdateAlliesFollow();
         }
@@ -608,12 +608,12 @@ namespace DuckovMercenarySystemMod
                 if (patrolRangeField != null && patrolRangeField.FieldType == typeof(float))
                 {
                     float currentRange = (float)patrolRangeField.GetValue(aiController);
-                    if (currentRange < 15f)
+                    if (currentRange < 2f || currentRange > 4f)
                     {
-                        patrolRangeField.SetValue(aiController, 15f);
+                        patrolRangeField.SetValue(aiController, 2f);
                         if (!silent)
                         {
-                            Debug.Log($"      ✅ patrolRange: {currentRange} → 15米");
+                            Debug.Log($"      ✅ patrolRange: {currentRange} → 2米");
                         }
                     }
                 }

@@ -222,3 +222,5 @@ using UnityEngine;                 // Unity引擎
 
 **祝你Mod开发愉快！🦆**
 
+上传steam:
+steamcmd.exe +login user passwd +workshop_build_item D:\code\github\DuckovMercenarySystemMod\workshop.vdf +quit
