@@ -1,0 +1,11 @@
+"workshopitem"
+{
+	"appid"		"3167020"
+    "contentfolder" "C:\\code\\github\\DuckovMercenarySystemMod\\ReleaseExample\\DuckovMercenarySystemMod"
+    "previewfile"   "C:\\code\\github\\DuckovMercenarySystemMod\\ReleaseExample\\DuckovMercenarySystemMod\\preview.png"
+	"visibility"		"0"
+	"title"		"花钱雇鸭鸭的Mod"
+	"description"		"主要功能：\n- 按E使用背包里的金钱贿赂敌人，招募成为雇佣兵\n- 每位敌人拥有独立的价格与成功概率\n- 招募后的友军会围绕玩家巡逻并协助战斗\n\ngithub地址：https://github.com/chenhongjun/DuckovMercenarySystemMod"
+	"changenote"		"首次上传至创意工坊。"
+	"publishedfileid"		"3603772847"
+}
