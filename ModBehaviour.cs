@@ -16,9 +16,9 @@ namespace DuckovMercenarySystemMod
     public class ModBehaviour : Duckov.Modding.ModBehaviour
     {
         // 配置参数
-        private int bribePrice = 100;              // 每次贿赂的价格（金币）
-        private int minBribeTimes = 2;             // 最少贿赂次数
-        private int minTotalAmount = 100;          // 最少累计金额
+        private int perBribeAmount = 100;          // 每次贿赂向敌人转移的金额
+        private int minRequiredAmount = 50;        // 每个敌人最少报价
+        private int maxRequiredAmount = 1000;      // 每个敌人最高报价
         private float bribeRange = 3f;             // 贿赂范围（米）- 俯视图游戏用靠近方式
         
         // 物品ID常量
@@ -32,6 +32,8 @@ namespace DuckovMercenarySystemMod
         {
             public int Times = 0;         // 贿赂次数
             public int TotalAmount = 0;   // 累计金额
+            public int FailedAttempts = 0; // 达到门槛后的失败次数
+            public int RequiredAmount = 0; // 目标开价
         }
         
         // 存储每个敌人的贿赂记录
@@ -39,6 +41,20 @@ namespace DuckovMercenarySystemMod
         
         // 存储被贿赂的友军（跟随玩家移动）
         private List<CharacterMainControl> allies = new List<CharacterMainControl>();
+        private int maxAllyCount = 2;               // 友军上限
+        private static readonly string[] MaxPartyAllyMessages = new[]
+        {
+            "人太多会把我的战术动作堵死！",
+            "再来一个就得轮流蹲坑了！",
+            "别挤别挤，护甲都快被磨花了！",
+            "我这身肌肉可是需要呼吸空间的！",
+            "队伍爆满啦，留条命给我们喘气！",
+            "兄弟，多一个人就要分我战利品了！",
+            "饿的时候我的口粮可不够分！",
+            "再来人我就要睡走廊了！",
+            "别再拉人啦，我们已经够壮观了！",
+            "排队贿赂好吗？一个个来！"
+        };
         
         // 友军跟随更新参数
         private float followUpdateInterval = 0.05f; // 跟随更新间隔（秒）- 每秒20次
@@ -48,8 +64,8 @@ namespace DuckovMercenarySystemMod
         {
             Debug.Log("=== 雇佣兵系统Mod v1.8 已加载 ===");
             Debug.Log("功能说明：");
-            Debug.Log($"  E键 - 靠近敌人后按E贿赂（{bribePrice}金币/次，范围{bribeRange}米）");
-            Debug.Log($"  转换条件：至少贿赂{minBribeTimes}次 且 累计金额≥{minTotalAmount}金币");
+            Debug.Log($"  E键 - 靠近敌人后按E贿赂（每次 {perBribeAmount} 金币，范围{bribeRange}米）");
+            Debug.Log($"  转换条件：敌人随机要价 {minRequiredAmount}-{maxRequiredAmount} 金币，凑够后有概率招募（失败越多越倔强）");
             Debug.Log($"  ✅ 友军保留完整AI智能（会攻击、会躲避、自然移动）");
             Debug.Log("调试功能：");
             Debug.Log($"  F9键 - 给自己添加测试金币");
@@ -209,12 +225,46 @@ namespace DuckovMercenarySystemMod
         }
 
         /// <summary>
+        /// 在指定角色头顶显示气泡消息
+        /// </summary>
+        private void ShowCharacterBubble(CharacterMainControl character, string message, float duration = 2f)
+        {
+            try
+            {
+                if (character != null)
+                {
+                    DialogueBubblesManager.Show(message, character.transform, duration);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"显示角色气泡时出错: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// 尝试贿赂敌人（俯视图游戏，使用距离检测）
         /// </summary>
         private void TryBribeEnemy()
         {
             try
             {
+                // 首先检查友军数量是否达到上限
+                allies.RemoveAll(ally => ally == null || ally.gameObject == null);
+                if (allies.Count >= maxAllyCount)
+                {
+                    ShowPlayerBubble("队伍已满，保持阵型就好！", 2.5f);
+                    foreach (var ally in allies)
+                    {
+                        if (ally != null)
+                        {
+                            string complain = MaxPartyAllyMessages[UnityEngine.Random.Range(0, MaxPartyAllyMessages.Length)];
+                            ShowCharacterBubble(ally, complain, 2.5f);
+                        }
+                    }
+                    return;
+                }
+
                 // 1. 找到玩家位置
                 GameObject playerObj = GetPlayerObject();
                 if (playerObj == null)
@@ -275,64 +325,83 @@ namespace DuckovMercenarySystemMod
 
                 Debug.Log($"🎯 贿赂目标: {targetCharacter.gameObject.name} (距离: {minDistance:F2}米)");
 
-                // 6. 检查玩家金钱
-                if (!HasEnoughMoney(bribePrice))
+                // 7. 检查玩家金钱
+                if (!HasEnoughMoney(perBribeAmount))
                 {
-                    Debug.LogWarning($"❌ 金钱不足！需要 {bribePrice} 金币");
-                    ShowPlayerBubble($"金钱不足！需要 {bribePrice} 金币", 2f);
+                    Debug.LogWarning($"❌ 金钱不足！需要 {perBribeAmount} 金币");
+                    ShowPlayerBubble($"金钱不足！需要 {perBribeAmount} 金币", 2f);
                     return;
                 }
 
-                // 7. 扣除金钱并转移给敌人
-                DeductMoney(bribePrice, targetCharacter);
+                // 8. 扣除金钱并转移给敌人
+                DeductMoney(perBribeAmount, targetCharacter);
 
-                // 8. 更新贿赂记录
+                // 9. 更新贿赂记录
                 if (!bribeRecords.ContainsKey(targetCharacter))
                 {
-                    bribeRecords[targetCharacter] = new BribeRecord();
+                    var newRecord = new BribeRecord
+                    {
+                        RequiredAmount = UnityEngine.Random.Range(minRequiredAmount, maxRequiredAmount + 1)
+                    };
+                    bribeRecords[targetCharacter] = newRecord;
+
+                    Debug.Log($"💬 {targetCharacter.gameObject.name} 的要价: {newRecord.RequiredAmount} 金币");
+                    ShowCharacterBubble(targetCharacter, $"想让我帮忙？至少拿出 {newRecord.RequiredAmount} 金币。", 3f);
                 }
                 
                 BribeRecord record = bribeRecords[targetCharacter];
                 record.Times++;
-                record.TotalAmount += bribePrice;
+                record.TotalAmount += perBribeAmount;
 
                 Debug.Log($"💰 贿赂成功！");
-                Debug.Log($"   贿赂次数: {record.Times}/{minBribeTimes}");
-                Debug.Log($"   累计金额: {record.TotalAmount}/{minTotalAmount}");
+                Debug.Log($"   贿赂次数: {record.Times}");
+                Debug.Log($"   累计金额: {record.TotalAmount}");
+                Debug.Log($"   目标要价: {record.RequiredAmount}");
 
-                // 9. 检查是否同时满足两个条件
-                if (record.Times >= minBribeTimes && record.TotalAmount >= minTotalAmount)
+                if (record.TotalAmount >= record.RequiredAmount)
                 {
-                    Debug.Log($"✅ 满足转换条件！");
-                    ShowPlayerBubble("🎉 贿赂成功！敌人已为你效力！", 3f);
-                    ConvertToAlly(targetCharacter);
+                    float successChance = Mathf.Max(0.05f, 0.5f - 0.05f * record.FailedAttempts); // 失败越多越难
+                    Debug.Log($"🎲 当前成功概率: {successChance * 100f:F1}% (贿赂次数: {record.Times})");
+
+                    bool convert = UnityEngine.Random.value < successChance;
+                    if (convert)
+                    {
+                        Debug.Log($"✅ 贿赂成功！敌人愿意加入你");
+                        string successMessage = record.FailedAttempts switch
+                        {
+                            0 => "好吧好吧…反正也没人看见，我跟你走！",
+                            1 => "哎呀别推了，我只是……暂时借个肩膀！",
+                            2 => "唉……都是你害的，我居然对铜臭妥协了……",
+                            3 => "好吧！真香！但你得保密，我可还是那个冷酷刺客！",
+                            4 => "行行行，别塞了，我怕了！真香定律又成功了……",
+                            _ => "别说话，钱包让我倒向了你，我承认我失败了……"
+                        };
+                        ShowCharacterBubble(targetCharacter, successMessage, 3f);
+                        bribeRecords.Remove(targetCharacter);
+                        ConvertToAlly(targetCharacter);
+                    }
+                    else
+                    {
+                        Debug.Log($"⚠️ 敌人仍然犹豫，未加入");
+                        record.FailedAttempts++;
+                        string failMessage = record.FailedAttempts switch
+                        {
+                            1 => "滚开！贫穷不能打败信仰！",
+                            2 => "别想用铜臭玷污我！",
+                            3 => "你的钱臭气熏天，我宁死不屈！",
+                            4 => "我不在乎你给多少！……其实给太多也…不对，我不要！",
+                            5 => "手别抖了，再试也没用！",
+                            6 => "我绝对不会向你低头……你以为我会说真香吗？",
+                            _ => "我…绝对不会向金钱低头！再加点试试？"
+                        };
+                        ShowCharacterBubble(targetCharacter, failMessage, 2.5f);
+                    }
                 }
                 else
                 {
-                    // 显示还需要什么
-                    string message = $"贿赂中... ({record.Times}/{minBribeTimes}次";
-                    
-                    if (record.Times < minBribeTimes && record.TotalAmount < minTotalAmount)
-                    {
-                        int needTimes = minBribeTimes - record.Times;
-                        int needMoney = minTotalAmount - record.TotalAmount;
-                        message += $", 还需{needTimes}次/{needMoney}金币)";
-                        Debug.Log($"   还需贿赂 {needTimes} 次");
-                        Debug.Log($"   还需累计 {needMoney} 金币");
-                    }
-                    else if (record.Times < minBribeTimes)
-                    {
-                        int needTimes = minBribeTimes - record.Times;
-                        message += $", 还需{needTimes}次)";
-                        Debug.Log($"   还需贿赂 {needTimes} 次");
-                    }
-                    else if (record.TotalAmount < minTotalAmount)
-                    {
-                        int needMoney = minTotalAmount - record.TotalAmount;
-                        message += $", 还需{needMoney}金币)";
-                        Debug.Log($"   还需累计 {needMoney} 金币");
-                    }
-                    
+                    int needMoney = Mathf.Max(0, record.RequiredAmount - record.TotalAmount);
+                    string message = $"贿赂中... 还差 {needMoney} 金币（总要价 {record.RequiredAmount}）";
+                    Debug.Log($"   还需累计 {needMoney} 金币 / 要价 {record.RequiredAmount}");
                     ShowPlayerBubble(message, 2.5f);
                 }
             }
