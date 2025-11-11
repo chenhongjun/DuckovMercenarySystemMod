@@ -18,8 +18,8 @@ namespace DuckovMercenarySystemMod
         // 配置参数
         private int perBribeAmount = 100;          // 每次贿赂向敌人转移的金额
         private int minRequiredAmount = 50;        // 每个敌人最少报价
-        private int maxRequiredAmount = 1000;      // 每个敌人最高报价
-        private float bribeRange = 3f;             // 贿赂范围（米）- 俯视图游戏用靠近方式
+        private int maxRequiredAmount = 800;      // 每个敌人最高报价
+        private float bribeRange = 4f;             // 贿赂范围（米）- 俯视图游戏用靠近方式
         
         // 物品ID常量
         private const int ITEM_ID_COIN = 451;      // 金币ID
@@ -304,7 +304,7 @@ namespace DuckovMercenarySystemMod
                 if (nearbyEnemies.Count == 0)
                 {
                     Debug.Log($"❌ 附近{bribeRange}米内没有敌人");
-                    ShowPlayerBubble("附近没有敌人...", 2f);
+                    ShowPlayerBubble("附近没敌人...", 2f);
                     return;
                 }
 
@@ -334,7 +334,7 @@ namespace DuckovMercenarySystemMod
                 if (!HasEnoughMoney(perBribeAmount))
                 {
                     Debug.LogWarning($"❌ 金钱不足！需要 {perBribeAmount} 金币");
-                    ShowPlayerBubble($"金钱不足！需要 {perBribeAmount} 金币", 2f);
+                    ShowPlayerBubble($"现金不足！", 2f);
                     return;
                 }
 
@@ -351,7 +351,7 @@ namespace DuckovMercenarySystemMod
                     bribeRecords[targetCharacter] = newRecord;
 
                     Debug.Log($"💬 {targetCharacter.gameObject.name} 的要价: {newRecord.RequiredAmount} 金币");
-                    ShowCharacterBubble(targetCharacter, $"想让我帮忙？至少拿出 {newRecord.RequiredAmount} 金币。", 3f);
+                    ShowCharacterBubble(targetCharacter, $"我要价 {newRecord.RequiredAmount} 元/次。", 3f);
                 }
                 
                 BribeRecord record = bribeRecords[targetCharacter];
@@ -409,8 +409,8 @@ namespace DuckovMercenarySystemMod
                 else
                 {
                     int needMoney = Mathf.Max(0, record.RequiredAmount - record.TotalAmount);
-                    string message = $"贿赂中... 还差 {needMoney} 金币（总要价 {record.RequiredAmount}）";
-                    Debug.Log($"   还需累计 {needMoney} 金币 / 要价 {record.RequiredAmount}");
+                    string message = $"还差 {needMoney}/{record.RequiredAmount} 金币";
+                    Debug.Log($"   还需累计 {needMoney} 现金 / 要价 {record.RequiredAmount}");
                     ShowPlayerBubble(message, 2.5f);
                 }
             }
