@@ -26,6 +26,8 @@ namespace DuckovMercenarySystemMod
         
         // 缓存的玩家对象
         private CharacterMainControl cachedPlayer = null;
+        private Teams cachedPlayerTeam;
+        private bool hasCachedPlayerTeam = false;
         
         // 贿赂记录类
         private class BribeRecord
@@ -44,16 +46,16 @@ namespace DuckovMercenarySystemMod
         private int maxAllyCount = 2;               // 友军上限
         private static readonly string[] MaxPartyAllyMessages = new[]
         {
-            "人太多会把我的战术动作堵死！",
-            "再来一个就得轮流蹲坑了！",
-            "别挤别挤，护甲都快被磨花了！",
-            "我这身肌肉可是需要呼吸空间的！",
-            "队伍爆满啦，留条命给我们喘气！",
-            "兄弟，多一个人就要分我战利品了！",
-            "饿的时候我的口粮可不够分！",
-            "再来人我就要睡走廊了！",
-            "别再拉人啦，我们已经够壮观了！",
-            "排队贿赂好吗？一个个来！"
+            "够了够了，别挤！",
+            "队伍满编，暂停。",
+            "让点位置透口气。",
+            "人手够用，别招了。",
+            "我护甲要被挤坏了！",
+            "再来我就没床睡了。",
+            "兄弟，战利品不够分。",
+            "口粮告急，先别加人。",
+            "爆满啦，保持阵型。",
+            "排队来，别抢道。"
         };
         
         // 友军跟随更新参数
@@ -75,6 +77,9 @@ namespace DuckovMercenarySystemMod
             Debug.Log($"  F5键 - 探索CharacterItemControl（查看背包字段）");
             Debug.Log($"  F4键 - 探索Item类（查看数量字段名）");
             Debug.Log("========================");
+
+            // 启动时预缓存玩家与队伍信息
+            GetOrFindPlayer();
         }
 
         void Update()
@@ -131,7 +136,7 @@ namespace DuckovMercenarySystemMod
         private void UpdateAlliesFollow()
         {
             if (allies.Count == 0) return;
-            
+
             // 使用计时器减少更新频率
             followTimer += Time.deltaTime;
             if (followTimer < followUpdateInterval)
@@ -369,12 +374,14 @@ namespace DuckovMercenarySystemMod
                         Debug.Log($"✅ 贿赂成功！敌人愿意加入你");
                         string successMessage = record.FailedAttempts switch
                         {
-                            0 => "好吧好吧…反正也没人看见，我跟你走！",
-                            1 => "哎呀别推了，我只是……暂时借个肩膀！",
-                            2 => "唉……都是你害的，我居然对铜臭妥协了……",
-                            3 => "好吧！真香！但你得保密，我可还是那个冷酷刺客！",
-                            4 => "行行行，别塞了，我怕了！真香定律又成功了……",
-                            _ => "别说话，钱包让我倒向了你，我承认我失败了……"
+                            0 => "好吧，被你收买了。",
+                            1 => "哎，好像也不错。",
+                            2 => "真香…我承认。",
+                            3 => "行，保密啊。",
+                            4 => "别塞了，我跟你走。",
+                            5 => "好吧，我投降。",
+                            6 => "行行行，真香了。",
+                            _ => "钱包赢了，我输了。"
                         };
                         ShowCharacterBubble(targetCharacter, successMessage, 3f);
                         bribeRecords.Remove(targetCharacter);
@@ -386,13 +393,15 @@ namespace DuckovMercenarySystemMod
                         record.FailedAttempts++;
                         string failMessage = record.FailedAttempts switch
                         {
-                            1 => "滚开！贫穷不能打败信仰！",
-                            2 => "别想用铜臭玷污我！",
-                            3 => "你的钱臭气熏天，我宁死不屈！",
-                            4 => "我不在乎你给多少！……其实给太多也…不对，我不要！",
-                            5 => "手别抖了，再试也没用！",
-                            6 => "我绝对不会向你低头……你以为我会说真香吗？",
-                            _ => "我…绝对不会向金钱低头！再加点试试？"
+                            1 => "滚开，没兴趣。",
+                            2 => "铜臭味太重。",
+                            3 => "这点钱？走开。",
+                            4 => "我宁死不屈。",
+                            5 => "再塞也没用。",
+                            6 => "别妄想真香。",
+                            7 => "梦里才会答应。",
+                            8 => "钱包赢不了我。",
+                            _ => "我不会向钱低头！"
                         };
                         ShowCharacterBubble(targetCharacter, failMessage, 2.5f);
                     }
@@ -416,9 +425,18 @@ namespace DuckovMercenarySystemMod
         /// </summary>
         private CharacterMainControl GetOrFindPlayer()
         {
+            if (cachedPlayer == null)
+            {
+                hasCachedPlayerTeam = false;
+            }
+
             // 如果缓存存在且有效，直接返回
             if (cachedPlayer != null)
             {
+                if (!hasCachedPlayerTeam)
+                {
+                    CachePlayerTeam(cachedPlayer);
+                }
                 return cachedPlayer;
             }
 
@@ -426,9 +444,45 @@ namespace DuckovMercenarySystemMod
             if (playerObj != null)
             {
                 cachedPlayer = playerObj.GetComponent<CharacterMainControl>();
+                if (cachedPlayer != null)
+                {
+                    CachePlayerTeam(cachedPlayer);
+                }
             }
 
             return cachedPlayer;
+        }
+
+        private void CachePlayerTeam(CharacterMainControl player)
+        {
+            if (player == null) return;
+            cachedPlayerTeam = player.Team;
+            hasCachedPlayerTeam = true;
+        }
+
+        private bool TryGetPlayerTeam(out Teams team)
+        {
+            team = default;
+
+            CharacterMainControl player = GetOrFindPlayer();
+            if (player == null)
+            {
+                hasCachedPlayerTeam = false;
+                return false;
+            }
+
+            if (!hasCachedPlayerTeam)
+            {
+                CachePlayerTeam(player);
+            }
+
+            if (!hasCachedPlayerTeam)
+            {
+                return false;
+            }
+
+            team = cachedPlayerTeam;
+            return true;
         }
 
         /// <summary>
@@ -477,7 +531,8 @@ namespace DuckovMercenarySystemMod
             if (player == null) return false;
 
             // 检查是否和玩家同队
-            return character.Team == player.Team;
+            if (!TryGetPlayerTeam(out Teams playerTeam)) return false;
+            return character.Team == playerTeam;
         }
 
         /// <summary>
@@ -495,7 +550,11 @@ namespace DuckovMercenarySystemMod
                     return;
                 }
 
-                Teams playerTeam = player.Team;
+                if (!TryGetPlayerTeam(out Teams playerTeam))
+                {
+                    Debug.LogError("❌ 无法转换阵营：未能缓存玩家队伍");
+                    return;
+                }
 
                 Debug.Log($"🎉 贿赂成功！{enemy.gameObject.name} 现在为你效力！");
                 Debug.Log($"   转换阵营: {enemy.Team} → {playerTeam}");
