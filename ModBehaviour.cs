@@ -35,6 +35,10 @@ namespace DuckovMercenarySystemMod
         // 存储被贿赂的友军（跟随玩家移动）
         private List<CharacterMainControl> allies = new List<CharacterMainControl>();
         private int maxAllyCount = 2;               // 友军上限
+        
+        // AI状态重置冷却时间（避免频繁重置）
+        private Dictionary<CharacterMainControl, float> lastResetTime = new Dictionary<CharacterMainControl, float>();
+        private float resetCooldown = 2f;          // 重置冷却时间（秒）
         private static readonly string[] MaxPartyAllyMessages = new[]
         {
             "够了够了，别挤！",
@@ -58,7 +62,6 @@ namespace DuckovMercenarySystemMod
         // 锁血功能
         private bool isHealthLocked = false;        // 是否锁血
         private float lockedHealth = 100f;          // 锁定的生命值
-        private bool wasInvincibleBeforeLock = false; // 锁血前的无敌状态
         
         // F6调试打印功能（独立子类）
         private GameObjectInspector inspector = new GameObjectInspector();
@@ -172,6 +175,11 @@ namespace DuckovMercenarySystemMod
             lastPlayerPosition = playerPos;
             
             // 清理已死亡或无效的友军
+            var invalidAllies = allies.Where(ally => ally == null || ally.gameObject == null).ToList();
+            foreach (var invalidAlly in invalidAllies)
+            {
+                lastResetTime.Remove(invalidAlly); // 清理重置时间记录
+            }
             allies.RemoveAll(ally => ally == null || ally.gameObject == null);
             
             // 更新每个友军的移动
@@ -179,7 +187,7 @@ namespace DuckovMercenarySystemMod
             {
                 try
                 {
-                    UpdateAllyFollow(ally, playerPos);
+                    UpdateAllyFollow(ally, player);
                 }
                 catch (Exception ex)
                 {
@@ -207,6 +215,11 @@ namespace DuckovMercenarySystemMod
                 Teams originalTeam = Teams.scav; // 默认恢复到scav阵营
                 
                 // 清理无效的友军
+                var invalidAllies = allies.Where(ally => ally == null || ally.gameObject == null).ToList();
+                foreach (var invalidAlly in invalidAllies)
+                {
+                    lastResetTime.Remove(invalidAlly); // 清理重置时间记录
+                }
                 allies.RemoveAll(ally => ally == null || ally.gameObject == null);
                 
                 // 解散所有友军
@@ -218,6 +231,7 @@ namespace DuckovMercenarySystemMod
                         {
                             // 恢复为敌对阵营（或删除）
                             ally.SetTeam(originalTeam);
+                            lastResetTime.Remove(ally); // 清理重置时间记录
                             Debug.Log($"✅ 已解散友军: {ally.gameObject.name}");
                         }
                     }
@@ -228,6 +242,7 @@ namespace DuckovMercenarySystemMod
                 }
                 
                 allies.Clear();
+                lastResetTime.Clear(); // 清理所有重置时间记录
                 bribeRecords.Clear(); // 清空贿赂记录
                 
                 Debug.Log($"✅ 已解散所有友军 (共 {count} 名)");
@@ -261,40 +276,13 @@ namespace DuckovMercenarySystemMod
                 {
                     lockedHealth = GetPlayerHealth(player);
                     
-                    // 保存当前的无敌状态（如果可读）
-                    try
-                    {
-                        Type playerType = player.GetType();
-                        PropertyInfo healthProp = playerType.GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
-                        if (healthProp != null)
-                        {
-                            object healthComponent = healthProp.GetValue(player);
-                            if (healthComponent != null)
-                            {
-                                Type healthType = healthComponent.GetType();
-                                PropertyInfo invincibleProp = healthType.GetProperty("Invincible", BindingFlags.Public | BindingFlags.Instance);
-                                if (invincibleProp != null)
-                                {
-                                    wasInvincibleBeforeLock = (bool)invincibleProp.GetValue(healthComponent);
-                                }
-                            }
-                        }
-                    }
-                    catch { }
-                    
-                    // 尝试设置无敌状态（更有效的锁血方式）
-                    TrySetPlayerInvincible(player, true);
-                    
-                    Debug.Log($"🔒 锁血已开启，锁定生命值: {lockedHealth}");
-                    ShowPlayerBubble($"🔒 锁血已开启 ({lockedHealth:F0} HP)", 2.5f);
+                    Debug.Log($"[ToggleHealthLock] 锁血已开启，锁定生命值: {lockedHealth}");
+                    ShowPlayerBubble($"锁血已开启 ({lockedHealth:F0} HP)", 2.5f);
                 }
                 else
                 {
-                    // 恢复之前的无敌状态
-                    TrySetPlayerInvincible(player, wasInvincibleBeforeLock);
-                    
-                    Debug.Log("🔓 锁血已关闭");
-                    ShowPlayerBubble("🔓 锁血已关闭", 2.5f);
+                    Debug.Log("[ToggleHealthLock] 锁血已关闭");
+                    ShowPlayerBubble("锁血已关闭", 2.5f);
                 }
             }
             catch (Exception ex)
@@ -304,57 +292,7 @@ namespace DuckovMercenarySystemMod
         }
         
         /// <summary>
-        /// 尝试设置玩家无敌状态（通过Health组件的SetInvincible方法）
-        /// </summary>
-        private void TrySetPlayerInvincible(CharacterMainControl player, bool invincible)
-        {
-            try
-            {
-                if (player == null)
-                {
-                    Debug.LogWarning("⚠️ [TrySetPlayerInvincible] 玩家对象为空");
-                    return;
-                }
-                
-                // 通过CharacterMainControl的Health属性获取Health组件
-                Type playerType = player.GetType();
-                PropertyInfo healthProp = playerType.GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
-                
-                if (healthProp == null)
-                {
-                    Debug.LogWarning("⚠️ [TrySetPlayerInvincible] 未找到CharacterMainControl.Health属性");
-                    return;
-                }
-                
-                object healthComponent = healthProp.GetValue(player);
-                if (healthComponent == null)
-                {
-                    Debug.LogWarning("⚠️ [TrySetPlayerInvincible] Health组件为空");
-                    return;
-                }
-                
-                Type healthType = healthComponent.GetType();
-                
-                // 使用SetInvincible方法设置无敌状态
-                MethodInfo setInvincibleMethod = healthType.GetMethod("SetInvincible", BindingFlags.Public | BindingFlags.Instance, null, new Type[] { typeof(bool) }, null);
-                if (setInvincibleMethod != null)
-                {
-                    setInvincibleMethod.Invoke(healthComponent, new object[] { invincible });
-                    Debug.Log($"✅ [TrySetPlayerInvincible] 设置无敌状态: {invincible}");
-                }
-                else
-                {
-                    Debug.LogWarning("⚠️ [TrySetPlayerInvincible] 未找到SetInvincible方法");
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"❌ [TrySetPlayerInvincible] 设置无敌状态时出错: {ex.Message}\n{ex.StackTrace}");
-            }
-        }
-        
-        /// <summary>
-        /// 维持玩家生命值（锁血功能 - 每帧强制设置 + 无敌状态）
+        /// 维持玩家生命值（锁血功能 - 每帧强制设置为锁定值）
         /// </summary>
         private void MaintainPlayerHealth()
         {
@@ -373,14 +311,26 @@ namespace DuckovMercenarySystemMod
                 // 使用小的误差范围（0.1）避免浮点数精度问题
                 if (Mathf.Abs(currentHealth - lockedHealth) > 0.1f)
                 {
-                    Debug.Log($"🔒 [MaintainPlayerHealth] 检测到生命值变化: {currentHealth} → {lockedHealth}");
+                    Debug.Log($"[MaintainPlayerHealth] 检测到生命值变化: {currentHealth} → {lockedHealth} (锁定值: {lockedHealth})");
                     SetPlayerHealth(player, lockedHealth);
                     
                     // 验证设置是否成功
                     float verifyHealth = GetPlayerHealth(player);
                     if (Mathf.Abs(verifyHealth - lockedHealth) > 0.1f)
                     {
-                        Debug.LogWarning($"⚠️ [MaintainPlayerHealth] 锁血设置后验证失败: 期望 {lockedHealth}, 实际 {verifyHealth}");
+                        Debug.LogWarning($"[MaintainPlayerHealth] 锁血设置后验证失败: 期望 {lockedHealth}, 实际 {verifyHealth}");
+                    }
+                    else
+                    {
+                        Debug.Log($"[MaintainPlayerHealth] 锁血设置成功: {currentHealth} → {verifyHealth}");
+                    }
+                }
+                else
+                {
+                    // 即使生命值匹配，也输出调试信息（降低频率）
+                    if (Time.frameCount % 60 == 0) // 每60帧输出一次
+                    {
+                        Debug.Log($"[MaintainPlayerHealth] 生命值已锁定: {currentHealth} (锁定值: {lockedHealth})");
                     }
                 }
             }
@@ -438,7 +388,27 @@ namespace DuckovMercenarySystemMod
                 }
                 
                 float health = Convert.ToSingle(healthValue);
-                Debug.Log($"✅ [GetPlayerHealth] 成功获取生命值: {health}");
+                
+                // 尝试获取MaxHealth用于对比
+                PropertyInfo maxHealthProp = healthType.GetProperty("MaxHealth", BindingFlags.Public | BindingFlags.Instance);
+                if (maxHealthProp != null)
+                {
+                    object maxHealthValue = maxHealthProp.GetValue(healthComponent);
+                    if (maxHealthValue != null)
+                    {
+                        float maxHealth = Convert.ToSingle(maxHealthValue);
+                        Debug.Log($"✅ [GetPlayerHealth] CurrentHealth: {health}, MaxHealth: {maxHealth}");
+                    }
+                    else
+                    {
+                        Debug.Log($"✅ [GetPlayerHealth] 成功获取生命值: {health}");
+                    }
+                }
+                else
+                {
+                    Debug.Log($"✅ [GetPlayerHealth] 成功获取生命值: {health}");
+                }
+                
                 return health;
             }
             catch (Exception ex)
@@ -536,12 +506,47 @@ namespace DuckovMercenarySystemMod
         }
         
         /// <summary>
+        /// 计算玩家正前方指定距离的位置（用于友军跟随）
+        /// </summary>
+        private Vector3 GetPlayerForwardPosition(CharacterMainControl player, float distance = 5f)
+        {
+            if (player == null)
+            {
+                return Vector3.zero;
+            }
+            
+            // 获取玩家朝向（忽略Y轴旋转，只在水平面计算）
+            Vector3 forward = player.transform.forward;
+            forward.y = 0f;
+            forward.Normalize();
+            
+            // 如果玩家没有朝向（比如刚生成），使用默认方向
+            if (forward.magnitude < 0.1f)
+            {
+                forward = Vector3.forward;
+            }
+            
+            // 计算正前方位置
+            Vector3 forwardPos = player.transform.position + forward * distance;
+            return forwardPos;
+        }
+        
+        /// <summary>
         /// 控制友军跟随玩家（核心修复：清除AI战斗状态，强制回到巡逻状态）
         /// </summary>
-        private void UpdateAllyFollow(CharacterMainControl ally, Vector3 playerPos)
+        private void UpdateAllyFollow(CharacterMainControl ally, CharacterMainControl player)
         {
             try
             {
+                if (player == null)
+                {
+                    return;
+                }
+                
+                // 计算玩家正前方5米的位置（友军跟随目标位置）
+                Vector3 targetPos = GetPlayerForwardPosition(player, 5f);
+                Vector3 playerPos = player.transform.position; // 保留用于距离计算
+                
                 // 检查友军与玩家的距离
                 float distanceToPlayer = Vector3.Distance(ally.transform.position, playerPos);
                 
@@ -596,30 +601,66 @@ namespace DuckovMercenarySystemMod
                     isNoticed = (bool)noticedField.GetValue(aiCharacterController);
                 }
                 
-                // 如果距离太远，或者玩家在快速移动且AI处于战斗状态，强制重置AI状态
-                bool shouldResetAI = isTooFar || (playerMoveSpeed > 3f && (currentEnemy != null || isNoticed));
+                // 只在距离过远时强制重置AI状态（避免频繁重置导致AI无法正常战斗）
+                // 如果距离不远，即使AI在战斗也应该让它继续战斗，而不是强制重置
+                bool shouldResetAI = isTooFar;
+                
+                // 检查重置冷却时间（避免频繁重置）
+                if (shouldResetAI)
+                {
+                    if (lastResetTime.ContainsKey(ally))
+                    {
+                        float timeSinceLastReset = Time.time - lastResetTime[ally];
+                        if (timeSinceLastReset < resetCooldown)
+                        {
+                            shouldResetAI = false; // 还在冷却中，不重置
+                            if (Time.frameCount % 20 == 0)
+                            {
+                                Debug.Log($"[UpdateAllyFollow] {ally.gameObject.name} - 重置冷却中 ({timeSinceLastReset:F1}秒/{resetCooldown}秒)");
+                            }
+                        }
+                    }
+                }
+                
+                // 添加详细日志（降低频率，避免刷屏）
+                if (Time.frameCount % 20 == 0) // 每20帧输出一次
+                {
+                    Debug.Log($"[UpdateAllyFollow] {ally.gameObject.name} - 距离: {distanceToPlayer:F2}米, " +
+                             $"玩家速度: {playerMoveSpeed:F2}米/秒, " +
+                             $"isTooFar: {isTooFar}, " +
+                             $"currentEnemy: {(currentEnemy != null ? "有" : "无")}, " +
+                             $"isNoticed: {isNoticed}, " +
+                             $"shouldResetAI: {shouldResetAI}");
+                }
                 
                 if (shouldResetAI)
                 {
+                    Debug.Log($"[UpdateAllyFollow] 开始重置AI状态 - {ally.gameObject.name} (距离: {distanceToPlayer:F2}米, 速度: {playerMoveSpeed:F2}米/秒)");
+                    
                     // 1. 清除搜索到的敌人（让AI停止追踪敌人）
                     if (searchedEnemyField != null && currentEnemy != null)
                     {
                         searchedEnemyField.SetValue(aiCharacterController, null);
-                        Debug.Log($"      🔄 清除友军的searchedEnemy，强制回到巡逻状态 (距离: {distanceToPlayer:F2}米)");
+                        Debug.Log($"[UpdateAllyFollow] 清除友军的searchedEnemy，强制回到巡逻状态 (距离: {distanceToPlayer:F2}米)");
                     }
                     
                     // 2. 清除缓存的敌人
                     FieldInfo cachedSearchedEnemyField = aiType.GetField("cachedSearchedEnemy", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                     if (cachedSearchedEnemyField != null)
                     {
-                        cachedSearchedEnemyField.SetValue(aiCharacterController, null);
+                        object cachedEnemy = cachedSearchedEnemyField.GetValue(aiCharacterController);
+                        if (cachedEnemy != null)
+                        {
+                            cachedSearchedEnemyField.SetValue(aiCharacterController, null);
+                            Debug.Log($"[UpdateAllyFollow] 清除友军的cachedSearchedEnemy");
+                        }
                     }
                     
                     // 3. 重置警戒状态（如果可写）
                     if (noticedField != null && isNoticed)
                     {
                         noticedField.SetValue(aiCharacterController, false);
-                        Debug.Log($"      🔄 重置友军的noticed状态为false");
+                        Debug.Log($"[UpdateAllyFollow] 重置友军的noticed状态为false");
                     }
                     
                     // 4. 重置警戒标志（如果可写）
@@ -630,7 +671,7 @@ namespace DuckovMercenarySystemMod
                         if (isAlert)
                         {
                             alertField.SetValue(aiCharacterController, false);
-                            Debug.Log($"      🔄 重置友军的alert状态为false");
+                            Debug.Log($"[UpdateAllyFollow] 重置友军的alert状态为false");
                         }
                     }
                     
@@ -649,18 +690,89 @@ namespace DuckovMercenarySystemMod
                                 isWaitingForPath = result != null && (bool)result;
                             }
                             
-                            // 如果不在等待路径计算，强制移动到玩家位置
+                            Debug.Log($"[UpdateAllyFollow] 距离过远，准备强制移动 - isWaitingForPath: {isWaitingForPath}, 距离: {distanceToPlayer:F2}米");
+                            
+                            // 如果不在等待路径计算，强制移动到玩家正前方位置
                             if (!isWaitingForPath)
                             {
-                                moveToPosMethod.Invoke(aiCharacterController, new object[] { playerPos });
-                                Debug.Log($"      🚀 友军距离过远({distanceToPlayer:F2}米)，强制移动到玩家位置");
+                                try
+                                {
+                                    moveToPosMethod.Invoke(aiCharacterController, new object[] { targetPos });
+                                    Debug.Log($"[UpdateAllyFollow] 已调用MoveToPos，目标位置（玩家正前方5米）: {targetPos}");
+                                    
+                                    // 如果距离非常远（>50米），尝试直接设置位置（作为最后手段）
+                                    if (distanceToPlayer > 50f)
+                                    {
+                                        Vector3 teleportPos = targetPos + Vector3.up * 0.5f; // 稍微抬高避免卡地下
+                                        ally.transform.position = teleportPos;
+                                        Debug.Log($"[UpdateAllyFollow] 距离过远({distanceToPlayer:F2}米)，直接传送友军到玩家正前方: {teleportPos}");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Debug.LogError($"[UpdateAllyFollow] 调用MoveToPos时出错: {ex.Message}");
+                                    
+                                    // 如果MoveToPos失败且距离很远，尝试直接传送
+                                    if (distanceToPlayer > 50f)
+                                    {
+                                        Vector3 teleportPos = targetPos + Vector3.up * 0.5f;
+                                        ally.transform.position = teleportPos;
+                                        Debug.Log($"[UpdateAllyFollow] MoveToPos失败，直接传送友军到玩家正前方: {teleportPos}");
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                Debug.Log($"[UpdateAllyFollow] 友军正在等待路径计算，跳过强制移动");
+                                
+                                // 即使等待路径，如果距离非常远也直接传送
+                                if (distanceToPlayer > 50f)
+                                {
+                                    Vector3 teleportPos = targetPos + Vector3.up * 0.5f;
+                                    ally.transform.position = teleportPos;
+                                    Debug.Log($"[UpdateAllyFollow] 等待路径中但距离过远，直接传送友军到玩家正前方: {teleportPos}");
+                                }
+                            }
+                        }
+                        else
+                        {
+                            Debug.Log($"[UpdateAllyFollow] 未找到MoveToPos方法，无法强制移动");
+                            
+                            // 如果没有MoveToPos方法且距离很远，直接传送
+                            if (distanceToPlayer > 50f)
+                            {
+                                Vector3 teleportPos = targetPos + Vector3.up * 0.5f;
+                                ally.transform.position = teleportPos;
+                                Debug.Log($"[UpdateAllyFollow] 无MoveToPos方法，直接传送友军到玩家正前方: {teleportPos}");
                             }
                         }
                     }
+                    
+                    // 记录重置时间（用于冷却）
+                    lastResetTime[ally] = Time.time;
                 }
                 
-                // 更新巡逻位置为玩家当前位置（正常跟随逻辑）
-                UpdateAIPatrolPosition(aiCharacterController, playerPos);
+                // 更新巡逻位置为玩家正前方5米位置（正常跟随逻辑）
+                UpdateAIPatrolPosition(aiCharacterController, targetPos);
+                
+                // 优化：设置AI朝向移动方向，避免倒着走路
+                // 只在非战斗状态或距离较远时设置朝向（避免干扰战斗）
+                bool isInCombat = currentEnemy != null || isNoticed;
+                if (!isInCombat || distanceToPlayer > 5f)
+                {
+                    // 计算从友军到目标位置的方向（忽略Y轴高度差）
+                    Vector3 allyPos = ally.transform.position;
+                    Vector3 directionToTarget = targetPos - allyPos;
+                    directionToTarget.y = 0f; // 只在水平面计算方向
+                    
+                    // 如果距离足够远，设置朝向
+                    if (directionToTarget.magnitude > 0.1f)
+                    {
+                        Quaternion targetRotation = Quaternion.LookRotation(directionToTarget.normalized);
+                        // 平滑旋转，避免突然转向（旋转速度：每秒5倍）
+                        ally.transform.rotation = Quaternion.Slerp(ally.transform.rotation, targetRotation, Time.deltaTime * 5f);
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -713,6 +825,11 @@ namespace DuckovMercenarySystemMod
             try
             {
                 // 首先检查友军数量是否达到上限
+                var invalidAllies = allies.Where(ally => ally == null || ally.gameObject == null).ToList();
+                foreach (var invalidAlly in invalidAllies)
+                {
+                    lastResetTime.Remove(invalidAlly); // 清理重置时间记录
+                }
                 allies.RemoveAll(ally => ally == null || ally.gameObject == null);
                 if (allies.Count >= maxAllyCount)
                 {
@@ -1043,7 +1160,7 @@ namespace DuckovMercenarySystemMod
         {
             try
             {
-                Debug.Log($"   💡 策略：保留AI智能，修改巡逻中心点为玩家位置");
+                Debug.Log($"   💡 策略：保留AI智能，修改巡逻中心点为玩家正前方5米位置");
                 
                 // 查找AI控制器子对象
                 Transform aiController = ally.transform.Find("AIControllerTemplate(Clone)");
@@ -1078,10 +1195,13 @@ namespace DuckovMercenarySystemMod
                 
                 Debug.Log($"   📦 找到AICharacterController组件");
                 
-                // 修改巡逻位置为玩家位置（显示日志）
-                UpdateAIPatrolPosition(aiCharacterController, player.transform.position, silent: false);
+                // 计算玩家正前方5米的位置（友军跟随目标位置）
+                Vector3 targetPos = GetPlayerForwardPosition(player, 5f);
                 
-                Debug.Log($"   ✅ AI保留完整智能（会攻击、会躲避），巡逻中心已设为玩家位置");
+                // 修改巡逻位置为玩家正前方5米位置（显示日志）
+                UpdateAIPatrolPosition(aiCharacterController, targetPos, silent: false);
+                
+                Debug.Log($"   ✅ AI保留完整智能（会攻击、会躲避），巡逻中心已设为玩家正前方5米位置");
             }
             catch (Exception ex)
             {
@@ -1109,6 +1229,12 @@ namespace DuckovMercenarySystemMod
                     // 优化2：如果距离太远（>5米），强制更新（防止跟丢）
                     bool shouldUpdate = distance > 0.3f; // 距离超过0.3米就更新
                     
+                    // 添加低频日志（每30帧输出一次，或距离变化较大时）
+                    if ((Time.frameCount % 30 == 0 || distance > 2f) && !silent)
+                    {
+                        Debug.Log($"[UpdateAIPatrolPosition] 巡逻位置检查 - 旧位置: {oldPos}, 新位置: {newPosition}, 距离: {distance:F2}米, shouldUpdate: {shouldUpdate}");
+                    }
+                    
                     if (shouldUpdate)
                     {
                         patrolPosField.SetValue(aiController, newPosition);
@@ -1116,6 +1242,10 @@ namespace DuckovMercenarySystemMod
                         if (!silent)
                         {
                             Debug.Log($"      ✅ patrolPosition: {oldPos} → {newPosition} (距离: {distance:F2}米)");
+                        }
+                        else if (distance > 2f) // 距离变化较大时也输出日志
+                        {
+                            Debug.Log($"[UpdateAIPatrolPosition] 更新巡逻位置: {oldPos} → {newPosition} (距离: {distance:F2}米)");
                         }
                     }
                 }
@@ -1148,10 +1278,11 @@ namespace DuckovMercenarySystemMod
                     if (Mathf.Abs(currentRange - targetRange) > 0.5f)
                     {
                         patrolRangeField.SetValue(aiController, targetRange);
-                        if (!silent)
-                        {
-                            Debug.Log($"      ✅ patrolRange: {currentRange} → {targetRange}米 (玩家速度: {playerMoveSpeed:F2}米/秒)");
-                        }
+                        Debug.Log($"[UpdateAIPatrolPosition] 更新巡逻范围: {currentRange} → {targetRange}米 (玩家速度: {playerMoveSpeed:F2}米/秒)");
+                    }
+                    else if (Time.frameCount % 60 == 0 && !silent) // 每60帧输出一次当前范围
+                    {
+                        Debug.Log($"[UpdateAIPatrolPosition] 当前巡逻范围: {currentRange}米, 目标范围: {targetRange}米 (玩家速度: {playerMoveSpeed:F2}米/秒)");
                     }
                 }
             }
