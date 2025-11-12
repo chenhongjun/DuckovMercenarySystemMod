@@ -52,10 +52,13 @@ namespace DuckovMercenarySystemMod
         // 友军跟随更新参数
         private float followUpdateInterval = 0.05f; // 跟随更新间隔（秒）- 每秒20次
         private float followTimer = 0f;
+        private Vector3 lastPlayerPosition = Vector3.zero; // 上次玩家位置（用于计算移动速度）
+        private float playerMoveSpeed = 0f; // 玩家移动速度（米/秒）
         
         // 锁血功能
         private bool isHealthLocked = false;        // 是否锁血
         private float lockedHealth = 100f;          // 锁定的生命值
+        private bool wasInvincibleBeforeLock = false; // 锁血前的无敌状态
         
         // F6调试打印功能（独立子类）
         private GameObjectInspector inspector = new GameObjectInspector();
@@ -137,7 +140,7 @@ namespace DuckovMercenarySystemMod
         }
         
         /// <summary>
-        /// 更新所有友军的跟随行为
+        /// 更新所有友军的跟随行为（优化版：计算玩家移动速度）
         /// </summary>
         private void UpdateAlliesFollow()
         {
@@ -155,6 +158,18 @@ namespace DuckovMercenarySystemMod
             if (player == null) return;
             
             Vector3 playerPos = player.transform.position;
+            
+            // 计算玩家移动速度（用于动态调整巡逻范围）
+            if (lastPlayerPosition != Vector3.zero)
+            {
+                float distanceMoved = Vector3.Distance(lastPlayerPosition, playerPos);
+                playerMoveSpeed = distanceMoved / followUpdateInterval; // 米/秒
+            }
+            else
+            {
+                playerMoveSpeed = 0f;
+            }
+            lastPlayerPosition = playerPos;
             
             // 清理已死亡或无效的友军
             allies.RemoveAll(ally => ally == null || ally.gameObject == null);
@@ -245,11 +260,39 @@ namespace DuckovMercenarySystemMod
                 if (isHealthLocked)
                 {
                     lockedHealth = GetPlayerHealth(player);
+                    
+                    // 保存当前的无敌状态（如果可读）
+                    try
+                    {
+                        Type playerType = player.GetType();
+                        PropertyInfo healthProp = playerType.GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
+                        if (healthProp != null)
+                        {
+                            object healthComponent = healthProp.GetValue(player);
+                            if (healthComponent != null)
+                            {
+                                Type healthType = healthComponent.GetType();
+                                PropertyInfo invincibleProp = healthType.GetProperty("Invincible", BindingFlags.Public | BindingFlags.Instance);
+                                if (invincibleProp != null)
+                                {
+                                    wasInvincibleBeforeLock = (bool)invincibleProp.GetValue(healthComponent);
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                    
+                    // 尝试设置无敌状态（更有效的锁血方式）
+                    TrySetPlayerInvincible(player, true);
+                    
                     Debug.Log($"🔒 锁血已开启，锁定生命值: {lockedHealth}");
                     ShowPlayerBubble($"🔒 锁血已开启 ({lockedHealth:F0} HP)", 2.5f);
                 }
                 else
                 {
+                    // 恢复之前的无敌状态
+                    TrySetPlayerInvincible(player, wasInvincibleBeforeLock);
+                    
                     Debug.Log("🔓 锁血已关闭");
                     ShowPlayerBubble("🔓 锁血已关闭", 2.5f);
                 }
@@ -261,24 +304,89 @@ namespace DuckovMercenarySystemMod
         }
         
         /// <summary>
-        /// 维持玩家生命值（锁血功能）
+        /// 尝试设置玩家无敌状态（通过Health组件的SetInvincible方法）
+        /// </summary>
+        private void TrySetPlayerInvincible(CharacterMainControl player, bool invincible)
+        {
+            try
+            {
+                if (player == null)
+                {
+                    Debug.LogWarning("⚠️ [TrySetPlayerInvincible] 玩家对象为空");
+                    return;
+                }
+                
+                // 通过CharacterMainControl的Health属性获取Health组件
+                Type playerType = player.GetType();
+                PropertyInfo healthProp = playerType.GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
+                
+                if (healthProp == null)
+                {
+                    Debug.LogWarning("⚠️ [TrySetPlayerInvincible] 未找到CharacterMainControl.Health属性");
+                    return;
+                }
+                
+                object healthComponent = healthProp.GetValue(player);
+                if (healthComponent == null)
+                {
+                    Debug.LogWarning("⚠️ [TrySetPlayerInvincible] Health组件为空");
+                    return;
+                }
+                
+                Type healthType = healthComponent.GetType();
+                
+                // 使用SetInvincible方法设置无敌状态
+                MethodInfo setInvincibleMethod = healthType.GetMethod("SetInvincible", BindingFlags.Public | BindingFlags.Instance, null, new Type[] { typeof(bool) }, null);
+                if (setInvincibleMethod != null)
+                {
+                    setInvincibleMethod.Invoke(healthComponent, new object[] { invincible });
+                    Debug.Log($"✅ [TrySetPlayerInvincible] 设置无敌状态: {invincible}");
+                }
+                else
+                {
+                    Debug.LogWarning("⚠️ [TrySetPlayerInvincible] 未找到SetInvincible方法");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"❌ [TrySetPlayerInvincible] 设置无敌状态时出错: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// 维持玩家生命值（锁血功能 - 每帧强制设置 + 无敌状态）
         /// </summary>
         private void MaintainPlayerHealth()
         {
             try
             {
                 CharacterMainControl player = GetOrFindPlayer();
-                if (player == null) return;
+                if (player == null)
+                {
+                    Debug.LogWarning("⚠️ [MaintainPlayerHealth] 未找到玩家");
+                    return;
+                }
                 
                 float currentHealth = GetPlayerHealth(player);
-                if (currentHealth < lockedHealth)
+                
+                // 如果当前生命值不等于锁定值，强制设置为锁定值
+                // 使用小的误差范围（0.1）避免浮点数精度问题
+                if (Mathf.Abs(currentHealth - lockedHealth) > 0.1f)
                 {
+                    Debug.Log($"🔒 [MaintainPlayerHealth] 检测到生命值变化: {currentHealth} → {lockedHealth}");
                     SetPlayerHealth(player, lockedHealth);
+                    
+                    // 验证设置是否成功
+                    float verifyHealth = GetPlayerHealth(player);
+                    if (Mathf.Abs(verifyHealth - lockedHealth) > 0.1f)
+                    {
+                        Debug.LogWarning($"⚠️ [MaintainPlayerHealth] 锁血设置后验证失败: 期望 {lockedHealth}, 实际 {verifyHealth}");
+                    }
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"维持玩家生命值时出错: {ex.Message}");
+                Debug.LogError($"❌ [MaintainPlayerHealth] 维持玩家生命值时出错: {ex.Message}\n{ex.StackTrace}");
             }
         }
         
@@ -378,6 +486,24 @@ namespace DuckovMercenarySystemMod
                 {
                     setHealthMethod.Invoke(healthComponent, new object[] { health });
                     Debug.Log($"✅ [SetPlayerHealth] 使用SetHealth方法设置生命值: {health}");
+                    
+                    // 验证设置是否成功
+                    PropertyInfo verifyProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
+                    if (verifyProp != null)
+                    {
+                        float verifyValue = Convert.ToSingle(verifyProp.GetValue(healthComponent));
+                        if (Mathf.Abs(verifyValue - health) > 0.1f)
+                        {
+                            Debug.LogWarning($"⚠️ [SetPlayerHealth] SetHealth方法设置后验证失败: 期望 {health}, 实际 {verifyValue}");
+                            // 如果SetHealth失败，尝试直接设置CurrentHealth属性
+                            PropertyInfo fallbackHealthProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
+                            if (fallbackHealthProp != null && fallbackHealthProp.CanWrite)
+                            {
+                                fallbackHealthProp.SetValue(healthComponent, health);
+                                Debug.Log($"✅ [SetPlayerHealth] 回退方案：直接设置CurrentHealth属性: {health}");
+                            }
+                        }
+                    }
                     return;
                 }
                 
@@ -385,8 +511,19 @@ namespace DuckovMercenarySystemMod
                 PropertyInfo currentHealthProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
                 if (currentHealthProp != null && currentHealthProp.CanWrite)
                 {
+                    float oldValue = Convert.ToSingle(currentHealthProp.GetValue(healthComponent));
                     currentHealthProp.SetValue(healthComponent, health);
-                    Debug.Log($"✅ [SetPlayerHealth] 使用CurrentHealth属性设置生命值: {health}");
+                    
+                    // 验证设置是否成功
+                    float verifyValue = Convert.ToSingle(currentHealthProp.GetValue(healthComponent));
+                    if (Mathf.Abs(verifyValue - health) > 0.1f)
+                    {
+                        Debug.LogWarning($"⚠️ [SetPlayerHealth] CurrentHealth属性设置后验证失败: 期望 {health}, 实际 {verifyValue}");
+                    }
+                    else
+                    {
+                        Debug.Log($"✅ [SetPlayerHealth] 使用CurrentHealth属性设置生命值: {oldValue} → {health}");
+                    }
                     return;
                 }
                 
@@ -399,12 +536,18 @@ namespace DuckovMercenarySystemMod
         }
         
         /// <summary>
-        /// 控制友军跟随玩家（更新AI巡逻中心）
+        /// 控制友军跟随玩家（核心修复：清除AI战斗状态，强制回到巡逻状态）
         /// </summary>
         private void UpdateAllyFollow(CharacterMainControl ally, Vector3 playerPos)
         {
             try
             {
+                // 检查友军与玩家的距离
+                float distanceToPlayer = Vector3.Distance(ally.transform.position, playerPos);
+                
+                // 如果距离太远（>10米），需要强制重置AI状态
+                bool isTooFar = distanceToPlayer > 10f;
+                
                 // 查找AI控制器子对象
                 Transform aiController = ally.transform.Find("AIControllerTemplate(Clone)");
                 if (aiController == null)
@@ -432,7 +575,91 @@ namespace DuckovMercenarySystemMod
                     return;  // 没有组件，跳过
                 }
                 
-                // 更新巡逻位置为玩家当前位置
+                Type aiType = aiCharacterController.GetType();
+                
+                // 🔑 核心修复：清除AI的战斗/警戒状态，强制回到巡逻状态
+                // 问题原因：如果AI处于战斗状态（searchedEnemy != null）或警戒状态（noticed/alert = true），
+                // 它会优先执行战斗/警戒行为树，而不会响应patrolPosition的更新
+                
+                // 检查AI是否处于战斗/警戒状态
+                FieldInfo searchedEnemyField = aiType.GetField("searchedEnemy", BindingFlags.Public | BindingFlags.Instance);
+                object currentEnemy = null;
+                if (searchedEnemyField != null)
+                {
+                    currentEnemy = searchedEnemyField.GetValue(aiCharacterController);
+                }
+                
+                FieldInfo noticedField = aiType.GetField("noticed", BindingFlags.Public | BindingFlags.Instance);
+                bool isNoticed = false;
+                if (noticedField != null && noticedField.FieldType == typeof(bool))
+                {
+                    isNoticed = (bool)noticedField.GetValue(aiCharacterController);
+                }
+                
+                // 如果距离太远，或者玩家在快速移动且AI处于战斗状态，强制重置AI状态
+                bool shouldResetAI = isTooFar || (playerMoveSpeed > 3f && (currentEnemy != null || isNoticed));
+                
+                if (shouldResetAI)
+                {
+                    // 1. 清除搜索到的敌人（让AI停止追踪敌人）
+                    if (searchedEnemyField != null && currentEnemy != null)
+                    {
+                        searchedEnemyField.SetValue(aiCharacterController, null);
+                        Debug.Log($"      🔄 清除友军的searchedEnemy，强制回到巡逻状态 (距离: {distanceToPlayer:F2}米)");
+                    }
+                    
+                    // 2. 清除缓存的敌人
+                    FieldInfo cachedSearchedEnemyField = aiType.GetField("cachedSearchedEnemy", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (cachedSearchedEnemyField != null)
+                    {
+                        cachedSearchedEnemyField.SetValue(aiCharacterController, null);
+                    }
+                    
+                    // 3. 重置警戒状态（如果可写）
+                    if (noticedField != null && isNoticed)
+                    {
+                        noticedField.SetValue(aiCharacterController, false);
+                        Debug.Log($"      🔄 重置友军的noticed状态为false");
+                    }
+                    
+                    // 4. 重置警戒标志（如果可写）
+                    FieldInfo alertField = aiType.GetField("alert", BindingFlags.Public | BindingFlags.Instance);
+                    if (alertField != null && alertField.FieldType == typeof(bool))
+                    {
+                        bool isAlert = (bool)alertField.GetValue(aiCharacterController);
+                        if (isAlert)
+                        {
+                            alertField.SetValue(aiCharacterController, false);
+                            Debug.Log($"      🔄 重置友军的alert状态为false");
+                        }
+                    }
+                    
+                    // 5. 尝试使用MoveToPos强制移动（如果可用，仅在距离太远时）
+                    if (isTooFar)
+                    {
+                        MethodInfo moveToPosMethod = aiType.GetMethod("MoveToPos", BindingFlags.Public | BindingFlags.Instance, null, new Type[] { typeof(Vector3) }, null);
+                        if (moveToPosMethod != null)
+                        {
+                            // 检查是否在等待路径计算（避免冲突）
+                            MethodInfo waitingForPathMethod = aiType.GetMethod("WaitingForPathResult", BindingFlags.Public | BindingFlags.Instance);
+                            bool isWaitingForPath = false;
+                            if (waitingForPathMethod != null)
+                            {
+                                object result = waitingForPathMethod.Invoke(aiCharacterController, null);
+                                isWaitingForPath = result != null && (bool)result;
+                            }
+                            
+                            // 如果不在等待路径计算，强制移动到玩家位置
+                            if (!isWaitingForPath)
+                            {
+                                moveToPosMethod.Invoke(aiCharacterController, new object[] { playerPos });
+                                Debug.Log($"      🚀 友军距离过远({distanceToPlayer:F2}米)，强制移动到玩家位置");
+                            }
+                        }
+                    }
+                }
+                
+                // 更新巡逻位置为玩家当前位置（正常跟随逻辑）
                 UpdateAIPatrolPosition(aiCharacterController, playerPos);
             }
             catch (Exception ex)
@@ -863,7 +1090,7 @@ namespace DuckovMercenarySystemMod
         }
         
         /// <summary>
-        /// 更新AI的巡逻位置（静默模式，用于Update循环）
+        /// 更新AI的巡逻位置（优化版：降低阈值，动态调整范围）
         /// </summary>
         private void UpdateAIPatrolPosition(Component aiController, Vector3 newPosition, bool silent = true)
         {
@@ -876,15 +1103,19 @@ namespace DuckovMercenarySystemMod
                 if (patrolPosField != null && patrolPosField.FieldType == typeof(Vector3))
                 {
                     Vector3 oldPos = (Vector3)patrolPosField.GetValue(aiController);
+                    float distance = Vector3.Distance(oldPos, newPosition);
                     
-                    // 只有位置变化超过1米才更新（避免频繁修改）
-                    if (Vector3.Distance(oldPos, newPosition) > 1f)
+                    // 优化1：降低距离阈值（从1米降到0.3米），提高响应速度
+                    // 优化2：如果距离太远（>5米），强制更新（防止跟丢）
+                    bool shouldUpdate = distance > 0.3f; // 距离超过0.3米就更新
+                    
+                    if (shouldUpdate)
                     {
                         patrolPosField.SetValue(aiController, newPosition);
                         
                         if (!silent)
                         {
-                            Debug.Log($"      ✅ patrolPosition: {oldPos} → {newPosition}");
+                            Debug.Log($"      ✅ patrolPosition: {oldPos} → {newPosition} (距离: {distance:F2}米)");
                         }
                     }
                 }
@@ -893,17 +1124,33 @@ namespace DuckovMercenarySystemMod
                     Debug.Log($"      ⚠️ 未找到patrolPosition字段");
                 }
                 
-                // 可选：增加巡逻范围，让友军不要离太远（只设置一次）
+                // 优化3：根据玩家移动速度动态调整巡逻范围
                 FieldInfo patrolRangeField = aiType.GetField("patrolRange", BindingFlags.Public | BindingFlags.Instance);
                 if (patrolRangeField != null && patrolRangeField.FieldType == typeof(float))
                 {
                     float currentRange = (float)patrolRangeField.GetValue(aiController);
-                    if (currentRange < 2f || currentRange > 4f)
+                    
+                    // 根据玩家移动速度动态调整巡逻范围
+                    // 移动速度慢（<2米/秒）：3米范围
+                    // 移动速度中等（2-5米/秒）：4米范围
+                    // 移动速度快（>5米/秒）：5米范围
+                    float targetRange = 3f;
+                    if (playerMoveSpeed > 5f)
                     {
-                        patrolRangeField.SetValue(aiController, 2f);
+                        targetRange = 5f; // 快速移动时增大范围
+                    }
+                    else if (playerMoveSpeed > 2f)
+                    {
+                        targetRange = 4f; // 中等速度
+                    }
+                    
+                    // 如果当前范围与目标范围差距较大，更新它
+                    if (Mathf.Abs(currentRange - targetRange) > 0.5f)
+                    {
+                        patrolRangeField.SetValue(aiController, targetRange);
                         if (!silent)
                         {
-                            Debug.Log($"      ✅ patrolRange: {currentRange} → 2米");
+                            Debug.Log($"      ✅ patrolRange: {currentRange} → {targetRange}米 (玩家速度: {playerMoveSpeed:F2}米/秒)");
                         }
                     }
                 }
