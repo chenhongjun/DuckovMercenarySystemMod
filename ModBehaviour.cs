@@ -29,15 +29,6 @@ namespace DuckovMercenarySystemMod
         private Teams cachedPlayerTeam;
         private bool hasCachedPlayerTeam = false;
         
-        // 贿赂记录类
-        private class BribeRecord
-        {
-            public int Times = 0;         // 贿赂次数
-            public int TotalAmount = 0;   // 累计金额
-            public int FailedAttempts = 0; // 达到门槛后的失败次数
-            public int RequiredAmount = 0; // 目标开价
-        }
-        
         // 存储每个敌人的贿赂记录
         private Dictionary<CharacterMainControl, BribeRecord> bribeRecords = new Dictionary<CharacterMainControl, BribeRecord>();
         
@@ -61,6 +52,13 @@ namespace DuckovMercenarySystemMod
         // 友军跟随更新参数
         private float followUpdateInterval = 0.05f; // 跟随更新间隔（秒）- 每秒20次
         private float followTimer = 0f;
+        
+        // 锁血功能
+        private bool isHealthLocked = false;        // 是否锁血
+        private float lockedHealth = 100f;          // 锁定的生命值
+        
+        // F6调试打印功能（独立子类）
+        private GameObjectInspector inspector = new GameObjectInspector();
 
         void Awake()
         {
@@ -70,12 +68,10 @@ namespace DuckovMercenarySystemMod
             Debug.Log($"  转换条件：敌人随机要价 {minRequiredAmount}-{maxRequiredAmount} 金币，凑够后有概率招募（失败越多越倔强）");
             Debug.Log($"  ✅ 友军保留完整AI智能（会攻击、会躲避、自然移动）");
             Debug.Log("调试功能：");
+            Debug.Log($"  Q键 - 解散所有友军");
             Debug.Log($"  F9键 - 给自己添加测试金币");
-            Debug.Log($"  F8键 - 打印友军的所有组件（含子对象）");
-            Debug.Log($"  F7键 - 深度探索CharacterMainControl");
-            Debug.Log($"  F6键 - 探索AI控制器（查看巡逻点等AI参数）");
-            Debug.Log($"  F5键 - 探索CharacterItemControl（查看背包字段）");
-            Debug.Log($"  F4键 - 探索Item类（查看数量字段名）");
+            Debug.Log($"  F7键 - 切换玩家锁血（防止生命值减少）");
+            Debug.Log($"  F6键 - 递归打印玩家和所有队友的属性");
             Debug.Log("========================");
 
             // 启动时预缓存玩家与队伍信息
@@ -84,48 +80,58 @@ namespace DuckovMercenarySystemMod
 
         void Update()
         {
+            // 通用按键检测测试（调试用）
+            if (Input.anyKeyDown)
+            {
+                // 检测F6-F12键
+                for (int i = 6; i <= 12; i++)
+                {
+                    KeyCode fKey = (KeyCode)((int)KeyCode.F1 + i - 1);
+                    if (Input.GetKeyDown(fKey))
+                    {
+                        Debug.Log($"🔍 [Update] 检测到按键按下: {fKey}");
+                    }
+                }
+            }
+            
             // E键 - 贿赂敌人
             if (Input.GetKeyDown(KeyCode.E))
             {
                 TryBribeEnemy();
             }
-
+            
+            // Q键 - 解散所有友军
+            if (Input.GetKeyDown(KeyCode.Q))
+            {
+                DismissAllAllies();
+            }
+            
             // F9键 - 测试：给自己添加金币（方便测试）
             if (Input.GetKeyDown(KeyCode.F9))
             {
                 AddTestMoney();
             }
-            /*
-            // F8键 - 打印友军的所有组件列表
-            if (Input.GetKeyDown(KeyCode.F8))
-            {
-                PrintAllyComponents();
-            }
             
-            // F7键 - 深度探索CharacterMainControl组件
+            // F7键 - 切换玩家锁血（方便测试）
             if (Input.GetKeyDown(KeyCode.F7))
             {
-                PrintCharacterMainControlDetails();
+                Debug.Log("🔍 [Update] F7键被按下，准备切换锁血状态");
+                ToggleHealthLock();
             }
             
-            // F6键 - 探索AIControllerTemplate子对象
+            // F6键 - 递归打印玩家和所有队友的属性（方便测试）
             if (Input.GetKeyDown(KeyCode.F6))
             {
-                ExploreAIController();
+                Debug.Log("🔍 [Update] F6键被按下，准备打印玩家和队友属性");
+                inspector.PrintPlayerAndAlliesProperties(GetOrFindPlayer(), allies);
             }
             
-            // F5键 - 探索CharacterItemControl组件
-            if (Input.GetKeyDown(KeyCode.F5))
+            // 锁血检查（如果开启锁血，持续恢复生命值）
+            if (isHealthLocked)
             {
-                ExploreCharacterItemControl();
+                MaintainPlayerHealth();
             }
             
-            // F4键 - 探索Item类
-            if (Input.GetKeyDown(KeyCode.F4))
-            {
-                ExploreItemClass();
-            }
-            */
             // 更新友军跟随
             UpdateAlliesFollow();
         }
@@ -164,6 +170,231 @@ namespace DuckovMercenarySystemMod
                 {
                     Debug.LogWarning($"更新友军跟随时出错: {ex.Message}");
                 }
+            }
+        }
+        
+        /// <summary>
+        /// Q键 - 解散所有友军
+        /// </summary>
+        private void DismissAllAllies()
+        {
+            try
+            {
+                if (allies.Count == 0)
+                {
+                    Debug.Log("⚠️ 当前没有友军需要解散");
+                    ShowPlayerBubble("没有友军需要解散", 2f);
+                    return;
+                }
+                
+                int count = allies.Count;
+                CharacterMainControl player = GetOrFindPlayer();
+                Teams originalTeam = Teams.scav; // 默认恢复到scav阵营
+                
+                // 清理无效的友军
+                allies.RemoveAll(ally => ally == null || ally.gameObject == null);
+                
+                // 解散所有友军
+                foreach (var ally in allies.ToList())
+                {
+                    try
+                    {
+                        if (ally != null && ally.gameObject != null)
+                        {
+                            // 恢复为敌对阵营（或删除）
+                            ally.SetTeam(originalTeam);
+                            Debug.Log($"✅ 已解散友军: {ally.gameObject.name}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogWarning($"解散友军时出错: {ex.Message}");
+                    }
+                }
+                
+                allies.Clear();
+                bribeRecords.Clear(); // 清空贿赂记录
+                
+                Debug.Log($"✅ 已解散所有友军 (共 {count} 名)");
+                ShowPlayerBubble($"已解散所有友军 ({count}名)", 3f);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"解散友军时出错: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// F7键 - 切换玩家锁血状态
+        /// </summary>
+        private void ToggleHealthLock()
+        {
+            Debug.Log("🔍 [ToggleHealthLock] 函数开始执行");
+            
+            try
+            {
+                CharacterMainControl player = GetOrFindPlayer();
+                if (player == null)
+                {
+                    Debug.LogWarning("❌ [ToggleHealthLock] 未找到玩家，无法切换锁血");
+                    return;
+                }
+                
+                isHealthLocked = !isHealthLocked;
+                
+                if (isHealthLocked)
+                {
+                    lockedHealth = GetPlayerHealth(player);
+                    Debug.Log($"🔒 锁血已开启，锁定生命值: {lockedHealth}");
+                    ShowPlayerBubble($"🔒 锁血已开启 ({lockedHealth:F0} HP)", 2.5f);
+                }
+                else
+                {
+                    Debug.Log("🔓 锁血已关闭");
+                    ShowPlayerBubble("🔓 锁血已关闭", 2.5f);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"切换锁血状态时出错: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// 维持玩家生命值（锁血功能）
+        /// </summary>
+        private void MaintainPlayerHealth()
+        {
+            try
+            {
+                CharacterMainControl player = GetOrFindPlayer();
+                if (player == null) return;
+                
+                float currentHealth = GetPlayerHealth(player);
+                if (currentHealth < lockedHealth)
+                {
+                    SetPlayerHealth(player, lockedHealth);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"维持玩家生命值时出错: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// 获取玩家生命值（通过Health组件的CurrentHealth属性）
+        /// </summary>
+        private float GetPlayerHealth(CharacterMainControl player)
+        {
+            try
+            {
+                if (player == null)
+                {
+                    Debug.LogWarning("⚠️ [GetPlayerHealth] 玩家对象为空");
+                    return 0f;
+                }
+                
+                // 通过CharacterMainControl的Health属性获取Health组件
+                Type playerType = player.GetType();
+                PropertyInfo healthProp = playerType.GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
+                
+                if (healthProp == null)
+                {
+                    Debug.LogWarning("⚠️ [GetPlayerHealth] 未找到CharacterMainControl.Health属性");
+                    return 0f;
+                }
+                
+                object healthComponent = healthProp.GetValue(player);
+                if (healthComponent == null)
+                {
+                    Debug.LogWarning("⚠️ [GetPlayerHealth] Health组件为空");
+                    return 0f;
+                }
+                
+                // 通过Health组件的CurrentHealth属性获取当前生命值
+                Type healthType = healthComponent.GetType();
+                PropertyInfo currentHealthProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
+                
+                if (currentHealthProp == null)
+                {
+                    Debug.LogWarning("⚠️ [GetPlayerHealth] 未找到Health.CurrentHealth属性");
+                    return 0f;
+                }
+                
+                object healthValue = currentHealthProp.GetValue(healthComponent);
+                if (healthValue == null)
+                {
+                    Debug.LogWarning("⚠️ [GetPlayerHealth] CurrentHealth值为null");
+                    return 0f;
+                }
+                
+                float health = Convert.ToSingle(healthValue);
+                Debug.Log($"✅ [GetPlayerHealth] 成功获取生命值: {health}");
+                return health;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"❌ [GetPlayerHealth] 获取生命值时出错: {ex.Message}\n{ex.StackTrace}");
+                return 0f;
+            }
+        }
+        
+        /// <summary>
+        /// 设置玩家生命值（通过Health组件的CurrentHealth属性或SetHealth方法）
+        /// </summary>
+        private void SetPlayerHealth(CharacterMainControl player, float health)
+        {
+            try
+            {
+                if (player == null)
+                {
+                    Debug.LogWarning("⚠️ [SetPlayerHealth] 玩家对象为空");
+                    return;
+                }
+                
+                // 通过CharacterMainControl的Health属性获取Health组件
+                Type playerType = player.GetType();
+                PropertyInfo healthProp = playerType.GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
+                
+                if (healthProp == null)
+                {
+                    Debug.LogWarning("⚠️ [SetPlayerHealth] 未找到CharacterMainControl.Health属性");
+                    return;
+                }
+                
+                object healthComponent = healthProp.GetValue(player);
+                if (healthComponent == null)
+                {
+                    Debug.LogWarning("⚠️ [SetPlayerHealth] Health组件为空");
+                    return;
+                }
+                
+                Type healthType = healthComponent.GetType();
+                
+                // 优先尝试使用SetHealth方法（更安全）
+                MethodInfo setHealthMethod = healthType.GetMethod("SetHealth", BindingFlags.Public | BindingFlags.Instance, null, new Type[] { typeof(float) }, null);
+                if (setHealthMethod != null)
+                {
+                    setHealthMethod.Invoke(healthComponent, new object[] { health });
+                    Debug.Log($"✅ [SetPlayerHealth] 使用SetHealth方法设置生命值: {health}");
+                    return;
+                }
+                
+                // 如果SetHealth方法不存在，尝试直接设置CurrentHealth属性
+                PropertyInfo currentHealthProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
+                if (currentHealthProp != null && currentHealthProp.CanWrite)
+                {
+                    currentHealthProp.SetValue(healthComponent, health);
+                    Debug.Log($"✅ [SetPlayerHealth] 使用CurrentHealth属性设置生命值: {health}");
+                    return;
+                }
+                
+                Debug.LogWarning("⚠️ [SetPlayerHealth] 未找到SetHealth方法或CurrentHealth属性不可写");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"❌ [SetPlayerHealth] 设置生命值时出错: {ex.Message}\n{ex.StackTrace}");
             }
         }
         
@@ -279,24 +510,23 @@ namespace DuckovMercenarySystemMod
                 }
 
                 Vector3 playerPos = playerObj.transform.position;
+                Debug.Log($"📍 [TryBribeEnemy] 玩家位置: {playerPos}");
 
-                // 2. 查找附近的所有碰撞体
-                Collider[] nearbyColliders = Physics.OverlapSphere(playerPos, bribeRange);
-
-                // 3. 找到所有附近的敌人
+                // 2. 直接查找所有角色，然后按距离筛选（更可靠，不依赖碰撞体）
+                CharacterMainControl[] allCharacters = FindObjectsOfType<CharacterMainControl>();
                 List<CharacterMainControl> nearbyEnemies = new List<CharacterMainControl>();
                 
-                foreach (Collider col in nearbyColliders)
+                foreach (CharacterMainControl character in allCharacters)
                 {
-                    CharacterMainControl character = col.GetComponent<CharacterMainControl>();
-                    if (character == null)
-                    {
-                        character = col.GetComponentInParent<CharacterMainControl>();
-                    }
-
-                    if (character != null && character.gameObject != playerObj && !IsAlly(character))
+                    if (character == null || character.gameObject == null) continue;
+                    if (character.gameObject == playerObj) continue;
+                    if (IsAlly(character)) continue;
+                    
+                    float distance = Vector3.Distance(playerPos, character.transform.position);
+                    if (distance <= bribeRange)
                     {
                         nearbyEnemies.Add(character);
+                        Debug.Log($"🎯 发现敌人: {character.gameObject.name} (距离: {distance:F2}米)");
                     }
                 }
 
@@ -329,6 +559,7 @@ namespace DuckovMercenarySystemMod
                 }
 
                 Debug.Log($"🎯 贿赂目标: {targetCharacter.gameObject.name} (距离: {minDistance:F2}米)");
+                Debug.Log($"📍 [TryBribeEnemy] 目标角色位置: {targetCharacter.transform.position}");
 
                 // 7. 检查玩家金钱
                 if (!HasEnoughMoney(perBribeAmount))
@@ -846,28 +1077,200 @@ namespace DuckovMercenarySystemMod
         }
 
         /// <summary>
-        /// 给角色添加金币（放在脚下，让角色自己捡）
+        /// 给角色添加金币（尝试直接添加到背包）
         /// </summary>
         private void GiveCoinsToCharacter(CharacterMainControl character, int amount)
         {
             try
             {
-                // 创建金币物品
-                Item coinItem = ItemAssetsCollection.InstantiateSync(ITEM_ID_COIN);
-                if (coinItem != null)
+                Debug.Log($"🔍 [GiveCoinsToCharacter] 开始执行 - 角色: {character?.gameObject?.name ?? "null"}, 金额: {amount}");
+                
+                if (character == null)
                 {
-                    SetItemAmount(coinItem, amount);
-                    
-                    // 将金币放在角色脚下（让角色自己捡取）
-                    coinItem.transform.position = character.transform.position + Vector3.up * 0.5f; // 稍微抬高避免卡地下
-                    
-                    Debug.Log($"   💰 已将 {amount} 金币放置在 {character.gameObject.name} 脚下");
-                    Debug.Log($"   💡 角色会自动捡起金币");
+                    Debug.LogError("❌ [GiveCoinsToCharacter] 角色对象为null");
+                    return;
                 }
+                
+                if (character.gameObject == null)
+                {
+                    Debug.LogError("❌ [GiveCoinsToCharacter] 角色的gameObject为null");
+                    return;
+                }
+                
+                Debug.Log($"📍 [GiveCoinsToCharacter] 角色位置: {character.transform.position}");
+                
+                // 创建金币物品
+                Debug.Log($"🔄 [GiveCoinsToCharacter] 正在创建金币物品 (ID: {ITEM_ID_COIN})...");
+                Item coinItem = ItemAssetsCollection.InstantiateSync(ITEM_ID_COIN);
+                
+                if (coinItem == null)
+                {
+                    Debug.LogError($"❌ [GiveCoinsToCharacter] 金币物品创建失败！物品ID: {ITEM_ID_COIN}");
+                    return;
+                }
+                
+                Debug.Log($"✅ [GiveCoinsToCharacter] 金币物品创建成功: {coinItem.gameObject.name}");
+                
+                // 设置物品数量
+                Debug.Log($"🔄 [GiveCoinsToCharacter] 正在设置物品数量为 {amount}...");
+                int oldAmount = GetItemAmount(coinItem);
+                Debug.Log($"📊 [GiveCoinsToCharacter] 设置前物品数量: {oldAmount}");
+                
+                SetItemAmount(coinItem, amount);
+                
+                int newAmount = GetItemAmount(coinItem);
+                Debug.Log($"📊 [GiveCoinsToCharacter] 设置后物品数量: {newAmount} (期望: {amount})");
+                
+                if (newAmount != amount)
+                {
+                    Debug.LogWarning($"⚠️ [GiveCoinsToCharacter] 物品数量设置可能失败！期望: {amount}, 实际: {newAmount}");
+                }
+                
+                // 方法1：尝试使用Item.Attach直接附加到角色
+                Debug.Log($"🔄 [GiveCoinsToCharacter] 尝试方法1: 使用Item.Attach附加到角色...");
+                try
+                {
+                    Type itemType = coinItem.GetType();
+                    MethodInfo attachMethod = itemType.GetMethod("Attach", new[] { typeof(CharacterMainControl) });
+                    if (attachMethod != null)
+                    {
+                        attachMethod.Invoke(coinItem, new object[] { character });
+                        Debug.Log($"✅ [GiveCoinsToCharacter] 方法1成功: 使用Attach附加到角色");
+                        CheckCharacterCoinsAfterDelay(character, amount, 1f).Forget();
+                        return;
+                    }
+                    else
+                    {
+                        Debug.Log($"⚠️ [GiveCoinsToCharacter] 方法1失败: 未找到Attach(CharacterMainControl)方法");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"⚠️ [GiveCoinsToCharacter] 方法1失败: {ex.Message}");
+                }
+                
+                // 方法2：尝试通过CharacterItemControl添加
+                Debug.Log($"🔄 [GiveCoinsToCharacter] 尝试方法2: 通过CharacterItemControl添加...");
+                try
+                {
+                    Component itemControl = character.GetComponent("CharacterItemControl");
+                    if (itemControl != null)
+                    {
+                        Type itemControlType = itemControl.GetType();
+                        // 尝试查找AddItem或类似方法
+                        MethodInfo[] methods = itemControlType.GetMethods(BindingFlags.Public | BindingFlags.Instance);
+                        foreach (var method in methods)
+                        {
+                            if (method.Name.ToLower().Contains("add") && method.Name.ToLower().Contains("item"))
+                            {
+                                Debug.Log($"🔍 [GiveCoinsToCharacter] 找到可能的方法: {method.Name}");
+                                try
+                                {
+                                    method.Invoke(itemControl, new object[] { coinItem });
+                                    Debug.Log($"✅ [GiveCoinsToCharacter] 方法2成功: 使用{method.Name}添加物品");
+                                    CheckCharacterCoinsAfterDelay(character, amount, 1f).Forget();
+                                    return;
+                                }
+                                catch (Exception ex)
+                                {
+                                    Debug.LogWarning($"⚠️ [GiveCoinsToCharacter] 方法2调用失败: {ex.Message}");
+                                }
+                            }
+                        }
+                        Debug.Log($"⚠️ [GiveCoinsToCharacter] 方法2失败: 未找到合适的添加物品方法");
+                    }
+                    else
+                    {
+                        Debug.Log($"⚠️ [GiveCoinsToCharacter] 方法2失败: 未找到CharacterItemControl组件");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"⚠️ [GiveCoinsToCharacter] 方法2失败: {ex.Message}");
+                }
+                
+                // 方法3：放在角色脚下（备用方案）
+                Debug.Log($"🔄 [GiveCoinsToCharacter] 尝试方法3: 放在角色脚下（备用方案）...");
+                Vector3 targetPosition = character.transform.position + Vector3.up * 0.5f;
+                coinItem.transform.position = targetPosition;
+                
+                Debug.Log($"📍 [GiveCoinsToCharacter] 金币已放置在位置: {targetPosition}");
+                Debug.Log($"   💰 已将 {amount} 金币放置在 {character.gameObject.name} 脚下（备用方案）");
+                Debug.Log($"   ⚠️ 注意：角色可能不会自动捡起，需要手动验证");
+                
+                // 延迟检查角色是否捡到金币（1秒后）
+                CheckCharacterCoinsAfterDelay(character, amount, 1f).Forget();
             }
             catch (Exception ex)
             {
-                Debug.LogError($"给角色添加金币时出错: {ex.Message}");
+                Debug.LogError($"❌ [GiveCoinsToCharacter] 给角色添加金币时出错: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// 延迟检查角色是否捡到金币
+        /// </summary>
+        private async UniTaskVoid CheckCharacterCoinsAfterDelay(CharacterMainControl character, int expectedAmount, float delaySeconds)
+        {
+            try
+            {
+                await UniTask.Delay(TimeSpan.FromSeconds(delaySeconds));
+                
+                if (character == null || character.gameObject == null)
+                {
+                    Debug.LogWarning($"⚠️ [CheckCharacterCoins] 角色已无效，无法检查金币");
+                    return;
+                }
+                
+                // 统计角色身上的金币
+                int totalCoins = CountCharacterCoins(character);
+                Debug.Log($"💰 [CheckCharacterCoins] {character.gameObject.name} 当前金币总数: {totalCoins} (期望增加: {expectedAmount})");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"⚠️ [CheckCharacterCoins] 检查金币时出错: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// 统计角色身上的金币数量
+        /// </summary>
+        private int CountCharacterCoins(CharacterMainControl character)
+        {
+            try
+            {
+                int totalCoins = 0;
+                
+                // 找到场景中所有的Item
+                Item[] allItems = FindObjectsOfType<Item>();
+                
+                // 筛选出在角色身上的金币
+                foreach (Item item in allItems)
+                {
+                    if (item == null) continue;
+                    
+                    // 检查是否在角色身上 且 是金币
+                    // 注意：这里需要根据实际API判断物品是否在角色身上
+                    // 可能需要使用不同的方法，比如检查item的持有者
+                    if (item.TypeID == ITEM_ID_COIN)
+                    {
+                        // 尝试通过距离判断（临时方案）
+                        float distance = Vector3.Distance(item.transform.position, character.transform.position);
+                        if (distance < 2f) // 如果物品在角色附近2米内，认为可能在角色身上
+                        {
+                            int itemAmount = GetItemAmount(item);
+                            totalCoins += itemAmount;
+                            Debug.Log($"   📦 发现金币物品: {item.gameObject.name}, 数量: {itemAmount}, 距离: {distance:F2}米");
+                        }
+                    }
+                }
+                
+                return totalCoins;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"统计角色金币时出错: {ex.Message}");
+                return 0;
             }
         }
 
@@ -923,188 +1326,6 @@ namespace DuckovMercenarySystemMod
             }
         }
 
-        /// <summary>
-        /// F8 - 打印友军的所有组件列表
-        /// </summary>
-        private void PrintAllyComponents()
-        {
-            try
-            {
-                if (allies.Count == 0)
-                {
-                    Debug.Log("⚠️ 当前没有友军");
-                    Debug.Log("💡 先用E键贿赂敌人，然后再按F8查看组件");
-                    return;
-                }
-                
-                Debug.Log("=== 📦 友军组件列表 ===");
-                Debug.Log("");
-                
-                foreach (var ally in allies)
-                {
-                    if (ally == null) continue;
-                    
-                    Debug.Log($"角色: {ally.gameObject.name}");
-                    Debug.Log($"位置: {ally.transform.position}");
-                    Debug.Log($"队伍: {ally.Team}");
-                    Debug.Log("");
-                    
-                    Component[] components = ally.GetComponents<Component>();
-                    Debug.Log($"共 {components.Length} 个组件:");
-                    
-                    foreach (var comp in components)
-                    {
-                        if (comp == null) continue;
-                        
-                        string typeName = comp.GetType().Name;
-                        bool isMonoBehaviour = comp is MonoBehaviour;
-                        bool isEnabled = isMonoBehaviour ? ((MonoBehaviour)comp).enabled : true;
-                        string status = isMonoBehaviour ? (isEnabled ? "🟢" : "🔴") : "⚪";
-                        
-                        Debug.Log($"  {status} {typeName}");
-                    }
-                    
-                    Debug.Log("");
-                    
-                    // 打印子对象状态及其组件
-                    int childCount = ally.transform.childCount;
-                    Debug.Log($"子对象 ({childCount}个):");
-                    for (int i = 0; i < childCount; i++)
-                    {
-                        Transform child = ally.transform.GetChild(i);
-                        string activeStatus = child.gameObject.activeSelf ? "🟢" : "🔴";
-                        Debug.Log($"  {activeStatus} {child.name}");
-                        
-                        // 如果是AI控制器，列出它的组件
-                        if (child.name.Contains("AI") || child.name.Contains("Controller"))
-                        {
-                            Component[] childComponents = child.GetComponents<Component>();
-                            Debug.Log($"      └─ 共 {childComponents.Length} 个组件:");
-                            foreach (var comp in childComponents)
-                            {
-                                if (comp == null) continue;
-                                string typeName = comp.GetType().Name;
-                                bool isMonoBehaviour = comp is MonoBehaviour;
-                                bool isEnabled = isMonoBehaviour ? ((MonoBehaviour)comp).enabled : true;
-                                string status = isMonoBehaviour ? (isEnabled ? "🟢" : "🔴") : "⚪";
-                                Debug.Log($"         {status} {typeName}");
-                            }
-                        }
-                    }
-                    
-                    Debug.Log("");
-                }
-                
-                Debug.Log("=== 列表完成 ===");
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"打印组件时出错: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// F7 - 打印CharacterMainControl详细信息（字段、属性、方法、子对象）
-        /// </summary>
-        private void PrintCharacterMainControlDetails()
-        {
-            try
-            {
-                if (allies.Count == 0)
-                {
-                    Debug.Log("⚠️ 当前没有友军");
-                    Debug.Log("💡 先用E键贿赂敌人，然后再按F7深度探索");
-                    return;
-                }
-                
-                Debug.Log("=== 🔬 CharacterMainControl 深度探索 ===");
-                Debug.Log("");
-                
-                foreach (var ally in allies)
-                {
-                    if (ally == null) continue;
-                    
-                    Debug.Log($"角色: {ally.gameObject.name}");
-                    Debug.Log($"位置: {ally.transform.position}");
-                    Debug.Log("");
-                    
-                    Type type = ally.GetType();
-                    
-                    // 1. 字段 (Fields)
-                    var fields = type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    Debug.Log($"📋 字段 ({fields.Length}个):");
-                    foreach (var field in fields)
-                    {
-                        try
-                        {
-                            object value = field.GetValue(ally);
-                            string valueStr = value != null ? value.ToString() : "null";
-                            if (valueStr.Length > 60) valueStr = valueStr.Substring(0, 60) + "...";
-                            Debug.Log($"  • {field.Name} ({field.FieldType.Name}): {valueStr}");
-                        }
-                        catch
-                        {
-                            Debug.Log($"  • {field.Name} ({field.FieldType.Name}): [无法读取]");
-                        }
-                    }
-                    Debug.Log("");
-                    
-                    // 2. 属性 (Properties)
-                    var properties = type.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    Debug.Log($"🔧 属性 ({properties.Length}个):");
-                    foreach (var prop in properties)
-                    {
-                        try
-                        {
-                            if (prop.CanRead)
-                            {
-                                object value = prop.GetValue(ally);
-                                string valueStr = value != null ? value.ToString() : "null";
-                                if (valueStr.Length > 60) valueStr = valueStr.Substring(0, 60) + "...";
-                                Debug.Log($"  • {prop.Name} ({prop.PropertyType.Name}): {valueStr}");
-                            }
-                            else
-                            {
-                                Debug.Log($"  • {prop.Name} ({prop.PropertyType.Name}): [不可读]");
-                            }
-                        }
-                        catch
-                        {
-                            Debug.Log($"  • {prop.Name} ({prop.PropertyType.Name}): [无法读取]");
-                        }
-                    }
-                    Debug.Log("");
-                    
-                    // 3. 方法 (Methods) - 只显示公共方法
-                    var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
-                    Debug.Log($"⚙️ 公共方法 ({methods.Length}个):");
-                    foreach (var method in methods)
-                    {
-                        var parameters = method.GetParameters();
-                        string paramStr = string.Join(", ", parameters.Select(p => $"{p.ParameterType.Name} {p.Name}"));
-                        Debug.Log($"  • {method.Name}({paramStr}) → {method.ReturnType.Name}");
-                    }
-                    Debug.Log("");
-                    
-                    // 4. 子对象 (Children)
-                    Transform trans = ally.transform;
-                    int childCount = trans.childCount;
-                    Debug.Log($"👶 子对象 ({childCount}个):");
-                    for (int i = 0; i < childCount; i++)
-                    {
-                        Transform child = trans.GetChild(i);
-                        Debug.Log($"  • {child.name} (位置: {child.localPosition})");
-                    }
-                    Debug.Log("");
-                }
-                
-                Debug.Log("=== 探索完成 ===");
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"探索CharacterMainControl时出错: {ex.Message}");
-            }
-        }
 
         /// <summary>
         /// F6 - 探索AIControllerTemplate子对象（这是AI的核心）
@@ -1299,246 +1520,6 @@ namespace DuckovMercenarySystemMod
         }
 
         /// <summary>
-        /// F4 - 探索Item类（查看数量字段名）
-        /// </summary>
-        private void ExploreItemClass()
-        {
-            try
-            {
-                Debug.Log("=== 💰 Item类探索 ===");
-                Debug.Log("");
-                
-                // 找到场景中所有的Item
-                Item[] allItems = FindObjectsOfType<Item>();
-                
-                // 找到玩家身上的第一个金币
-                Item coinItem = null;
-                foreach (Item item in allItems)
-                {
-                    if (item != null && item.IsInPlayerCharacter() && item.TypeID == ITEM_ID_COIN)
-                    {
-                        coinItem = item;
-                        break;
-                    }
-                }
-                
-                if (coinItem == null)
-                {
-                    Debug.Log("⚠️ 未找到玩家身上的金币");
-                    Debug.Log("💡 请先按F9添加测试金币，然后再按F4");
-                    return;
-                }
-                
-                Debug.Log($"📦 找到金币物品: TypeID = {coinItem.TypeID}");
-                Debug.Log("");
-                
-                Type itemType = coinItem.GetType();
-                
-                // 列出所有字段（公共+私有）
-                var fields = itemType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                Debug.Log($"📋 所有字段 ({fields.Length}个):");
-                
-                foreach (var field in fields)
-                {
-                    try
-                    {
-                        object value = field.GetValue(coinItem);
-                        string valueStr = value != null ? value.ToString() : "null";
-                        
-                        string accessLevel = field.IsPublic ? "public" : "private";
-                        string fieldTypeName = field.FieldType.Name;
-                        
-                        // 高亮显示数字类型的字段
-                        string highlight = "";
-                        if (fieldTypeName == "Int32" || fieldTypeName == "Single" || fieldTypeName == "Float" || 
-                            field.Name.ToLower().Contains("amount") || 
-                            field.Name.ToLower().Contains("count") ||
-                            field.Name.ToLower().Contains("quantity"))
-                        {
-                            highlight = " 🎯";
-                        }
-                        
-                        Debug.Log($"  {accessLevel} {field.Name} ({fieldTypeName}): {valueStr}{highlight}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.Log($"  {field.Name} ({field.FieldType.Name}): [无法读取: {ex.Message}]");
-                    }
-                }
-                
-                Debug.Log("");
-                
-                // 列出所有属性
-                var properties = itemType.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                Debug.Log($"🔧 所有属性 ({properties.Length}个):");
-                
-                foreach (var prop in properties)
-                {
-                    try
-                    {
-                        if (prop.CanRead)
-                        {
-                            object value = prop.GetValue(coinItem);
-                            string valueStr = value != null ? value.ToString() : "null";
-                            
-                            string propTypeName = prop.PropertyType.Name;
-                            
-                            string highlight = "";
-                            if (propTypeName == "Int32" || propTypeName == "Single" || propTypeName == "Float" ||
-                                prop.Name.ToLower().Contains("amount") || 
-                                prop.Name.ToLower().Contains("count") ||
-                                prop.Name.ToLower().Contains("quantity"))
-                            {
-                                highlight = " 🎯";
-                            }
-                            
-                            Debug.Log($"  {prop.Name} ({propTypeName}): {valueStr}{highlight}");
-                        }
-                        else
-                        {
-                            Debug.Log($"  {prop.Name} ({prop.PropertyType.Name}): [不可读]");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.Log($"  {prop.Name} ({prop.PropertyType.Name}): [无法读取: {ex.Message}]");
-                    }
-                }
-                
-                Debug.Log("");
-                Debug.Log("=== 探索完成 ===");
-                Debug.Log("💡 查找标记为 🎯 的字段/属性，这些可能是数量相关的");
-                Debug.Log("💡 特别注意 Int32 类型且值接近你的金币数量的字段");
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"探索Item类时出错: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// F5 - 探索CharacterItemControl组件（查看背包相关字段）
-        /// </summary>
-        private void ExploreCharacterItemControl()
-        {
-            try
-            {
-                CharacterMainControl player = GetOrFindPlayer();
-                if (player == null)
-                {
-                    Debug.Log("⚠️ 未找到玩家");
-                    return;
-                }
-                
-                Debug.Log("=== 🎒 CharacterItemControl 探索 ===");
-                Debug.Log("");
-                Debug.Log($"玩家: {player.gameObject.name}");
-                Debug.Log($"位置: {player.transform.position}");
-                Debug.Log("");
-                
-                // 获取CharacterItemControl组件
-                Component itemControl = player.GetComponent("CharacterItemControl");
-                if (itemControl == null)
-                {
-                    Debug.Log("⚠️ 未找到CharacterItemControl组件");
-                    return;
-                }
-                
-                Debug.Log($"📦 找到CharacterItemControl组件");
-                Debug.Log("");
-                
-                Type itemControlType = itemControl.GetType();
-                
-                // 列出所有字段（公共+私有）
-                var fields = itemControlType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                Debug.Log($"📋 所有字段 ({fields.Length}个):");
-                
-                foreach (var field in fields)
-                {
-                    try
-                    {
-                        object value = field.GetValue(itemControl);
-                        string valueStr = value != null ? value.ToString() : "null";
-                        
-                        // 限制显示长度
-                        if (valueStr.Length > 80)
-                        {
-                            valueStr = valueStr.Substring(0, 80) + "...";
-                        }
-                        
-                        string accessLevel = field.IsPublic ? "public" : "private";
-                        string fieldTypeName = field.FieldType.Name;
-                        
-                        // 高亮显示可能是背包的字段
-                        string highlight = "";
-                        if (field.Name.ToLower().Contains("inventory") || 
-                            field.Name.ToLower().Contains("item") ||
-                            field.Name.ToLower().Contains("container") ||
-                            fieldTypeName.Contains("Inventory"))
-                        {
-                            highlight = " 🎯";
-                        }
-                        
-                        Debug.Log($"  {accessLevel} {field.Name} ({fieldTypeName}): {valueStr}{highlight}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.Log($"  {field.Name} ({field.FieldType.Name}): [无法读取: {ex.Message}]");
-                    }
-                }
-                
-                Debug.Log("");
-                
-                // 列出所有属性
-                var properties = itemControlType.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                Debug.Log($"🔧 所有属性 ({properties.Length}个):");
-                
-                foreach (var prop in properties)
-                {
-                    try
-                    {
-                        if (prop.CanRead)
-                        {
-                            object value = prop.GetValue(itemControl);
-                            string valueStr = value != null ? value.ToString() : "null";
-                            
-                            if (valueStr.Length > 80)
-                            {
-                                valueStr = valueStr.Substring(0, 80) + "...";
-                            }
-                            
-                            string highlight = "";
-                            if (prop.Name.ToLower().Contains("inventory") || 
-                                prop.Name.ToLower().Contains("item") ||
-                                prop.PropertyType.Name.Contains("Inventory"))
-                            {
-                                highlight = " 🎯";
-                            }
-                            
-                            Debug.Log($"  {prop.Name} ({prop.PropertyType.Name}): {valueStr}{highlight}");
-                        }
-                        else
-                        {
-                            Debug.Log($"  {prop.Name} ({prop.PropertyType.Name}): [不可读]");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.Log($"  {prop.Name} ({prop.PropertyType.Name}): [无法读取: {ex.Message}]");
-                    }
-                }
-                
-                Debug.Log("");
-                Debug.Log("=== 探索完成 ===");
-                Debug.Log("💡 查找标记为 🎯 的字段/属性，这些可能是背包相关的");
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"探索CharacterItemControl时出错: {ex.Message}");
-            }
-        }
-
-        /// <summary>
         /// 获取物品数量（使用StackCount属性）
         /// </summary>
         private int GetItemAmount(Item item)
@@ -1547,7 +1528,7 @@ namespace DuckovMercenarySystemMod
             {
                 Type itemType = item.GetType();
                 
-                // 直接使用StackCount属性（从F4调试中发现的）
+                // 直接使用StackCount属性（从F6调试中发现的）
                 PropertyInfo stackCountProp = itemType.GetProperty("StackCount", BindingFlags.Public | BindingFlags.Instance);
                 
                 if (stackCountProp != null && stackCountProp.CanRead)
@@ -1578,7 +1559,7 @@ namespace DuckovMercenarySystemMod
             {
                 Type itemType = item.GetType();
                 
-                // 直接使用StackCount属性（从F4调试中发现的）
+                // 直接使用StackCount属性（从F6调试中发现的）
                 PropertyInfo stackCountProp = itemType.GetProperty("StackCount", BindingFlags.Public | BindingFlags.Instance);
                 
                 if (stackCountProp != null && stackCountProp.CanWrite)
