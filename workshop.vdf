@@ -1,11 +1,11 @@
 "workshopitem"
 {
 	"appid"		"3167020"
-    "contentfolder" "D:\\code\\github\\DuckovMercenarySystemMod\\ReleaseExample\\DuckovMercenarySystemMod"
-    "previewfile"   "D:\\code\\github\\DuckovMercenarySystemMod\\ReleaseExample\\DuckovMercenarySystemMod\\preview.png"
+    "contentfolder" "C:\\code\\github\\DuckovMercenarySystemMod\\ReleaseExample\\DuckovMercenarySystemMod"
+    "previewfile"   "C:\\code\\github\\DuckovMercenarySystemMod\\ReleaseExample\\DuckovMercenarySystemMod\\preview.png"
 	"visibility"		"0"
 	"title"		"Hire two teammates-雇两个保镖吧"
-	"description"		"主要功能：\n\n• 贴脸敌人，按E键使用背包里的现金雇佣\n• 每位敌人拥有独立的价位与成功率\n• 成为友军后会跟随玩家协助战斗\n• 最多可以有两个队友帮忙\n• 按Q键解除所有雇佣关系\n\n完全开源无病毒：\nhttps://github.com/chenhongjun/DuckovMercenarySystemMod\n\n有好的建议可以评论区留言，持续优化中..."
-	"changenote"		"代码优化"
+	"description"		"主要功能：贴脸敌人，按E键使用背包里的现金雇佣。按Q键解除所有雇佣关系。完全开源无病毒：\r\nhttps://github.com/chenhongjun/DuckovMercenarySystemMod\r\r\n有好的建议可以评论区留言，持续优化中..."
+	"changenote"		"钱进入敌人口袋"
 	"publishedfileid"		"3603772847"
 }

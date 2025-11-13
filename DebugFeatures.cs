@@ -99,18 +99,11 @@ namespace DuckovMercenarySystemMod
             
             try
             {
-                CharacterMainControl player = modBehaviour.GetOrFindPlayer();
-                if (player == null)
-                {
-                    Debug.LogWarning("❌ [ToggleHealthLock] 未找到玩家，无法切换锁血");
-                    return;
-                }
-                
                 isHealthLocked = !isHealthLocked;
                 
                 if (isHealthLocked)
                 {
-                    lockedHealth = GetPlayerHealth(player);
+                    lockedHealth = GetPlayerHealth();
                     
                     Debug.Log($"[ToggleHealthLock] 锁血已开启，锁定生命值: {lockedHealth}");
                     modBehaviour.ShowPlayerBubble($"锁血已开启 ({lockedHealth:F0} HP)", 2.5f);
@@ -134,27 +127,24 @@ namespace DuckovMercenarySystemMod
         {
             try
             {
-                CharacterMainControl player = modBehaviour.GetOrFindPlayer();
-                if (player == null)
-                {
-                    Debug.LogWarning("⚠️ [MaintainPlayerHealth] 未找到玩家");
-                    return;
-                }
+                float currentHealth = GetPlayerHealth();
                 
-                float currentHealth = GetPlayerHealth(player);
+                // 获取MaxHealth，确保锁定的生命值不超过MaxHealth
+                float maxHealth = GetMaxHealth();
+                float targetHealth = Mathf.Min(lockedHealth, maxHealth); // 确保不超过MaxHealth
                 
-                // 如果当前生命值不等于锁定值，强制设置为锁定值
+                // 如果当前生命值不等于目标值，强制设置为目标值
                 // 使用小的误差范围（0.1）避免浮点数精度问题
-                if (Mathf.Abs(currentHealth - lockedHealth) > 0.1f)
+                if (Mathf.Abs(currentHealth - targetHealth) > 0.1f)
                 {
-                    Debug.Log($"[MaintainPlayerHealth] 检测到生命值变化: {currentHealth} → {lockedHealth} (锁定值: {lockedHealth})");
-                    SetPlayerHealth(player, lockedHealth);
+                    Debug.Log($"[MaintainPlayerHealth] 检测到生命值变化: {currentHealth} → {targetHealth} (锁定值: {lockedHealth}, MaxHealth: {maxHealth})");
+                    SetPlayerHealth(targetHealth);
                     
                     // 验证设置是否成功
-                    float verifyHealth = GetPlayerHealth(player);
-                    if (Mathf.Abs(verifyHealth - lockedHealth) > 0.1f)
+                    float verifyHealth = GetPlayerHealth();
+                    if (Mathf.Abs(verifyHealth - targetHealth) > 0.1f)
                     {
-                        Debug.LogWarning($"[MaintainPlayerHealth] 锁血设置后验证失败: 期望 {lockedHealth}, 实际 {verifyHealth}");
+                        Debug.LogWarning($"[MaintainPlayerHealth] 锁血设置后验证失败: 期望 {targetHealth}, 实际 {verifyHealth}");
                     }
                     else
                     {
@@ -166,7 +156,7 @@ namespace DuckovMercenarySystemMod
                     // 即使生命值匹配，也输出调试信息（降低频率）
                     if (Time.frameCount % 60 == 0) // 每60帧输出一次
                     {
-                        Debug.Log($"[MaintainPlayerHealth] 生命值已锁定: {currentHealth} (锁定值: {lockedHealth})");
+                        Debug.Log($"[MaintainPlayerHealth] 生命值已锁定: {currentHealth} (锁定值: {lockedHealth}, MaxHealth: {maxHealth})");
                     }
                 }
             }
@@ -177,37 +167,152 @@ namespace DuckovMercenarySystemMod
         }
         
         /// <summary>
-        /// 获取玩家生命值（通过Health组件的CurrentHealth属性）
+        /// 获取玩家最大生命值
         /// </summary>
-        private float GetPlayerHealth(CharacterMainControl player)
+        private float GetMaxHealth()
         {
             try
             {
-                if (player == null)
-                {
-                    Debug.LogWarning("⚠️ [GetPlayerHealth] 玩家对象为空");
-                    return 0f;
-                }
-                
-                // 通过CharacterMainControl的Health属性获取Health组件
-                Type playerType = player.GetType();
-                PropertyInfo healthProp = playerType.GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
-                
-                if (healthProp == null)
-                {
-                    Debug.LogWarning("⚠️ [GetPlayerHealth] 未找到CharacterMainControl.Health属性");
-                    return 0f;
-                }
-                
-                object healthComponent = healthProp.GetValue(player);
+                // 获取主玩家的Health组件
+                object healthComponent = GetMainPlayerHealthComponent();
                 if (healthComponent == null)
                 {
-                    Debug.LogWarning("⚠️ [GetPlayerHealth] Health组件为空");
                     return 0f;
+                }
+                
+                Type healthType = healthComponent.GetType();
+                PropertyInfo maxHealthProp = healthType.GetProperty("MaxHealth", BindingFlags.Public | BindingFlags.Instance);
+                
+                if (maxHealthProp != null)
+                {
+                    object maxHealthValue = maxHealthProp.GetValue(healthComponent);
+                    if (maxHealthValue != null)
+                    {
+                        return Convert.ToSingle(maxHealthValue);
+                    }
+                }
+                
+                return 0f;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"❌ [GetMaxHealth] 获取最大生命值时出错: {ex.Message}");
+                return 0f;
+            }
+        }
+        
+        /// <summary>
+        /// 获取主玩家的Health组件（通过IsMainCharacter或IsMainCharacterHealth属性）
+        /// </summary>
+        private object GetMainPlayerHealthComponent()
+        {
+            try
+            {
+                // 方法1：遍历所有CharacterMainControl，找到IsMainCharacter为True的
+                CharacterMainControl[] allCharacters = UnityEngine.Object.FindObjectsOfType<CharacterMainControl>();
+                foreach (var character in allCharacters)
+                {
+                    Type charType = character.GetType();
+                    PropertyInfo isMainCharProp = charType.GetProperty("IsMainCharacter", BindingFlags.Public | BindingFlags.Instance);
+                    if (isMainCharProp != null)
+                    {
+                        object isMainValue = isMainCharProp.GetValue(character);
+                        if (isMainValue != null && Convert.ToBoolean(isMainValue))
+                        {
+                            // 找到主玩家，获取其Health组件
+                            PropertyInfo healthProp = charType.GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
+                            if (healthProp != null)
+                            {
+                                object healthComponent = healthProp.GetValue(character);
+                                if (healthComponent != null)
+                                {
+                                    Debug.Log($"✅ [GetMainPlayerHealthComponent] 通过IsMainCharacter找到主玩家Health组件: {character.gameObject.name}");
+                                    return healthComponent;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // 方法2：遍历所有Health组件，找到IsMainCharacterHealth为True的
+                Component[] allComponents = UnityEngine.Object.FindObjectsOfType<Component>();
+                foreach (var component in allComponents)
+                {
+                    if (component == null) continue;
+                    
+                    Type compType = component.GetType();
+                    if (compType.Name == "Health")
+                    {
+                        PropertyInfo isMainHealthProp = compType.GetProperty("IsMainCharacterHealth", BindingFlags.Public | BindingFlags.Instance);
+                        if (isMainHealthProp != null)
+                        {
+                            object isMainValue = isMainHealthProp.GetValue(component);
+                            if (isMainValue != null && Convert.ToBoolean(isMainValue))
+                            {
+                                Debug.Log($"✅ [GetMainPlayerHealthComponent] 通过IsMainCharacterHealth找到主玩家Health组件");
+                                return component;
+                            }
+                        }
+                    }
+                }
+                
+                // 方法3：回退到使用GetOrFindPlayer获取的Health组件
+                CharacterMainControl player = modBehaviour.GetOrFindPlayer();
+                if (player != null)
+                {
+                    Type playerType = player.GetType();
+                    PropertyInfo healthProp = playerType.GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
+                    if (healthProp != null)
+                    {
+                        object healthComponent = healthProp.GetValue(player);
+                        if (healthComponent != null)
+                        {
+                            Debug.LogWarning($"⚠️ [GetMainPlayerHealthComponent] 回退方案：使用GetOrFindPlayer获取的Health组件（可能不是主玩家）");
+                            return healthComponent;
+                        }
+                    }
+                }
+                
+                Debug.LogWarning("⚠️ [GetMainPlayerHealthComponent] 未找到主玩家Health组件");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"❌ [GetMainPlayerHealthComponent] 获取主玩家Health组件时出错: {ex.Message}\n{ex.StackTrace}");
+                return null;
+            }
+        }
+        
+        /// <summary>
+        /// 获取玩家生命值（通过主玩家的Health组件）
+        /// </summary>
+        private float GetPlayerHealth()
+        {
+            try
+            {
+                // 获取主玩家的Health组件
+                object healthComponent = GetMainPlayerHealthComponent();
+                if (healthComponent == null)
+                {
+                    Debug.LogWarning("⚠️ [GetPlayerHealth] 未找到主玩家Health组件");
+                    return 0f;
+                }
+                
+                Type healthType = healthComponent.GetType();
+                
+                // 检查是否是主玩家的Health组件
+                PropertyInfo isMainCharacterHealthProp = healthType.GetProperty("IsMainCharacterHealth", BindingFlags.Public | BindingFlags.Instance);
+                bool isMainCharacterHealth = false;
+                if (isMainCharacterHealthProp != null)
+                {
+                    object isMainValue = isMainCharacterHealthProp.GetValue(healthComponent);
+                    if (isMainValue != null)
+                    {
+                        isMainCharacterHealth = Convert.ToBoolean(isMainValue);
+                    }
                 }
                 
                 // 通过Health组件的CurrentHealth属性获取当前生命值
-                Type healthType = healthComponent.GetType();
                 PropertyInfo currentHealthProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
                 
                 if (currentHealthProp == null)
@@ -233,16 +338,16 @@ namespace DuckovMercenarySystemMod
                     if (maxHealthValue != null)
                     {
                         float maxHealth = Convert.ToSingle(maxHealthValue);
-                        Debug.Log($"✅ [GetPlayerHealth] CurrentHealth: {health}, MaxHealth: {maxHealth}");
+                        Debug.Log($"✅ [GetPlayerHealth] CurrentHealth: {health}, MaxHealth: {maxHealth}, IsMainCharacterHealth: {isMainCharacterHealth}");
                     }
                     else
                     {
-                        Debug.Log($"✅ [GetPlayerHealth] 成功获取生命值: {health}");
+                        Debug.Log($"✅ [GetPlayerHealth] 成功获取生命值: {health}, IsMainCharacterHealth: {isMainCharacterHealth}");
                     }
                 }
                 else
                 {
-                    Debug.Log($"✅ [GetPlayerHealth] 成功获取生命值: {health}");
+                    Debug.Log($"✅ [GetPlayerHealth] 成功获取生命值: {health}, IsMainCharacterHealth: {isMainCharacterHealth}");
                 }
                 
                 return health;
@@ -255,85 +360,68 @@ namespace DuckovMercenarySystemMod
         }
         
         /// <summary>
-        /// 设置玩家生命值（通过Health组件的CurrentHealth属性或SetHealth方法）
+        /// 设置玩家生命值（使用AddHealth方法或直接设置CurrentHealth属性）
         /// </summary>
-        private void SetPlayerHealth(CharacterMainControl player, float health)
+        private void SetPlayerHealth(float targetHealth)
         {
             try
             {
-                if (player == null)
-                {
-                    Debug.LogWarning("⚠️ [SetPlayerHealth] 玩家对象为空");
-                    return;
-                }
-                
-                // 通过CharacterMainControl的Health属性获取Health组件
-                Type playerType = player.GetType();
-                PropertyInfo healthProp = playerType.GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
-                
-                if (healthProp == null)
-                {
-                    Debug.LogWarning("⚠️ [SetPlayerHealth] 未找到CharacterMainControl.Health属性");
-                    return;
-                }
-                
-                object healthComponent = healthProp.GetValue(player);
+                // 获取主玩家的Health组件
+                object healthComponent = GetMainPlayerHealthComponent();
                 if (healthComponent == null)
                 {
-                    Debug.LogWarning("⚠️ [SetPlayerHealth] Health组件为空");
+                    Debug.LogWarning("⚠️ [SetPlayerHealth] 未找到主玩家Health组件");
                     return;
                 }
                 
                 Type healthType = healthComponent.GetType();
                 
-                // 优先尝试使用SetHealth方法（更安全）
-                MethodInfo setHealthMethod = healthType.GetMethod("SetHealth", BindingFlags.Public | BindingFlags.Instance, null, new Type[] { typeof(float) }, null);
-                if (setHealthMethod != null)
+                // 获取当前生命值
+                PropertyInfo currentHealthProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
+                if (currentHealthProp == null)
                 {
-                    setHealthMethod.Invoke(healthComponent, new object[] { health });
-                    Debug.Log($"✅ [SetPlayerHealth] 使用SetHealth方法设置生命值: {health}");
-                    
-                    // 验证设置是否成功
-                    PropertyInfo verifyProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
-                    if (verifyProp != null)
-                    {
-                        float verifyValue = Convert.ToSingle(verifyProp.GetValue(healthComponent));
-                        if (Mathf.Abs(verifyValue - health) > 0.1f)
-                        {
-                            Debug.LogWarning($"⚠️ [SetPlayerHealth] SetHealth方法设置后验证失败: 期望 {health}, 实际 {verifyValue}");
-                            // 如果SetHealth失败，尝试直接设置CurrentHealth属性
-                            PropertyInfo fallbackHealthProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
-                            if (fallbackHealthProp != null && fallbackHealthProp.CanWrite)
-                            {
-                                fallbackHealthProp.SetValue(healthComponent, health);
-                                Debug.Log($"✅ [SetPlayerHealth] 回退方案：直接设置CurrentHealth属性: {health}");
-                            }
-                        }
-                    }
+                    Debug.LogWarning("⚠️ [SetPlayerHealth] 未找到CurrentHealth属性");
                     return;
                 }
                 
-                // 如果SetHealth方法不存在，尝试直接设置CurrentHealth属性
-                PropertyInfo currentHealthProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
-                if (currentHealthProp != null && currentHealthProp.CanWrite)
+                float currentHealth = Convert.ToSingle(currentHealthProp.GetValue(healthComponent));
+                float healthDifference = targetHealth - currentHealth;
+                
+                // 如果目标生命值大于当前生命值，使用AddHealth方法增加
+                if (healthDifference > 0.1f)
                 {
-                    float oldValue = Convert.ToSingle(currentHealthProp.GetValue(healthComponent));
-                    currentHealthProp.SetValue(healthComponent, health);
-                    
-                    // 验证设置是否成功
-                    float verifyValue = Convert.ToSingle(currentHealthProp.GetValue(healthComponent));
-                    if (Mathf.Abs(verifyValue - health) > 0.1f)
+                    MethodInfo addHealthMethod = healthType.GetMethod("AddHealth", BindingFlags.Public | BindingFlags.Instance, null, new Type[] { typeof(float) }, null);
+                    if (addHealthMethod != null)
                     {
-                        Debug.LogWarning($"⚠️ [SetPlayerHealth] CurrentHealth属性设置后验证失败: 期望 {health}, 实际 {verifyValue}");
+                        addHealthMethod.Invoke(healthComponent, new object[] { healthDifference });
+                        Debug.Log($"✅ [SetPlayerHealth] 使用AddHealth方法增加生命值: {currentHealth} + {healthDifference} = {targetHealth}");
                     }
                     else
                     {
-                        Debug.Log($"✅ [SetPlayerHealth] 使用CurrentHealth属性设置生命值: {oldValue} → {health}");
+                        // 如果AddHealth不存在，直接设置CurrentHealth
+                        currentHealthProp.SetValue(healthComponent, targetHealth);
+                        Debug.Log($"✅ [SetPlayerHealth] 直接设置CurrentHealth属性: {currentHealth} → {targetHealth}");
                     }
+                }
+                // 如果目标生命值小于当前生命值，直接设置CurrentHealth（减少生命值）
+                else if (healthDifference < -0.1f)
+                {
+                    currentHealthProp.SetValue(healthComponent, targetHealth);
+                    Debug.Log($"✅ [SetPlayerHealth] 直接设置CurrentHealth属性（减少）: {currentHealth} → {targetHealth}");
+                }
+                // 如果已经接近目标值，不需要修改
+                else
+                {
+                    // 生命值已经正确，不需要修改
                     return;
                 }
                 
-                Debug.LogWarning("⚠️ [SetPlayerHealth] 未找到SetHealth方法或CurrentHealth属性不可写");
+                // 验证设置是否成功
+                float verifyValue = Convert.ToSingle(currentHealthProp.GetValue(healthComponent));
+                if (Mathf.Abs(verifyValue - targetHealth) > 0.1f)
+                {
+                    Debug.LogWarning($"⚠️ [SetPlayerHealth] 设置后验证失败: 期望 {targetHealth}, 实际 {verifyValue}");
+                }
             }
             catch (Exception ex)
             {

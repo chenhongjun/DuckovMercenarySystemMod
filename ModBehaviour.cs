@@ -1208,129 +1208,62 @@ namespace DuckovMercenarySystemMod
         }
 
         /// <summary>
-        /// 给角色添加金币（尝试直接添加到背包）
+        /// 给角色添加金币（使用CharacterItemControl.PickupItem方法）
         /// </summary>
         private void GiveCoinsToCharacter(CharacterMainControl character, int amount)
         {
             try
             {
-                Debug.Log($"🔍 [GiveCoinsToCharacter] 开始执行 - 角色: {character?.gameObject?.name ?? "null"}, 金额: {amount}");
-                
-                if (character == null)
+                if (character == null || character.gameObject == null)
                 {
-                    Debug.LogError("❌ [GiveCoinsToCharacter] 角色对象为null");
+                    Debug.LogError("❌ [GiveCoinsToCharacter] 角色对象无效");
                     return;
                 }
-                
-                if (character.gameObject == null)
-                {
-                    Debug.LogError("❌ [GiveCoinsToCharacter] 角色的gameObject为null");
-                    return;
-                }
-                
-                Debug.Log($"📍 [GiveCoinsToCharacter] 角色位置: {character.transform.position}");
                 
                 // 创建金币物品
-                Debug.Log($"🔄 [GiveCoinsToCharacter] 正在创建金币物品 (ID: {ITEM_ID_COIN})...");
                 Item coinItem = ItemAssetsCollection.InstantiateSync(ITEM_ID_COIN);
-                
                 if (coinItem == null)
                 {
                     Debug.LogError($"❌ [GiveCoinsToCharacter] 金币物品创建失败！物品ID: {ITEM_ID_COIN}");
                     return;
                 }
                 
-                Debug.Log($"✅ [GiveCoinsToCharacter] 金币物品创建成功: {coinItem.gameObject.name}");
-                
                 // 设置物品数量
-                Debug.Log($"🔄 [GiveCoinsToCharacter] 正在设置物品数量为 {amount}...");
-                int oldAmount = GetItemAmount(coinItem);
-                Debug.Log($"📊 [GiveCoinsToCharacter] 设置前物品数量: {oldAmount}");
-                
                 SetItemAmount(coinItem, amount);
                 
-                int newAmount = GetItemAmount(coinItem);
-                Debug.Log($"📊 [GiveCoinsToCharacter] 设置后物品数量: {newAmount} (期望: {amount})");
-                
-                if (newAmount != amount)
+                // 通过CharacterItemControl.PickupItem添加物品
+                Component itemControl = character.GetComponent("CharacterItemControl");
+                if (itemControl == null)
                 {
-                    Debug.LogWarning($"⚠️ [GiveCoinsToCharacter] 物品数量设置可能失败！期望: {amount}, 实际: {newAmount}");
+                    Debug.LogError($"❌ [GiveCoinsToCharacter] 未找到CharacterItemControl组件");
+                    coinItem.Detach(); // 清理物品
+                    return;
                 }
                 
-                // 方法1：尝试使用Item.Attach直接附加到角色
-                Debug.Log($"🔄 [GiveCoinsToCharacter] 尝试方法1: 使用Item.Attach附加到角色...");
-                try
+                Type itemControlType = itemControl.GetType();
+                MethodInfo pickupMethod = itemControlType.GetMethod("PickupItem", BindingFlags.Public | BindingFlags.Instance, null, new Type[] { typeof(Item) }, null);
+                
+                if (pickupMethod == null)
                 {
-                    Type itemType = coinItem.GetType();
-                    MethodInfo attachMethod = itemType.GetMethod("Attach", new[] { typeof(CharacterMainControl) });
-                    if (attachMethod != null)
-                    {
-                        attachMethod.Invoke(coinItem, new object[] { character });
-                        Debug.Log($"✅ [GiveCoinsToCharacter] 方法1成功: 使用Attach附加到角色");
-                        CheckCharacterCoinsAfterDelay(character, amount, 1f).Forget();
-                        return;
-                    }
-                    else
-                    {
-                        Debug.Log($"⚠️ [GiveCoinsToCharacter] 方法1失败: 未找到Attach(CharacterMainControl)方法");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"⚠️ [GiveCoinsToCharacter] 方法1失败: {ex.Message}");
+                    Debug.LogError($"❌ [GiveCoinsToCharacter] 未找到PickupItem方法");
+                    coinItem.Detach(); // 清理物品
+                    return;
                 }
                 
-                // 方法2：尝试通过CharacterItemControl添加
-                Debug.Log($"🔄 [GiveCoinsToCharacter] 尝试方法2: 通过CharacterItemControl添加...");
-                try
+                // 调用PickupItem方法
+                object result = pickupMethod.Invoke(itemControl, new object[] { coinItem });
+                bool success = result != null && (bool)result;
+                
+                if (success)
                 {
-                    Component itemControl = character.GetComponent("CharacterItemControl");
-                    if (itemControl != null)
-                    {
-                        Type itemControlType = itemControl.GetType();
-                        // 尝试查找AddItem或类似方法
-                        MethodInfo[] methods = itemControlType.GetMethods(BindingFlags.Public | BindingFlags.Instance);
-                        foreach (var method in methods)
-                        {
-                            if (method.Name.ToLower().Contains("add") && method.Name.ToLower().Contains("item"))
-                            {
-                                Debug.Log($"🔍 [GiveCoinsToCharacter] 找到可能的方法: {method.Name}");
-                                try
-                                {
-                                    method.Invoke(itemControl, new object[] { coinItem });
-                                    Debug.Log($"✅ [GiveCoinsToCharacter] 方法2成功: 使用{method.Name}添加物品");
-                                    CheckCharacterCoinsAfterDelay(character, amount, 1f).Forget();
-                                    return;
-                                }
-                                catch (Exception ex)
-                                {
-                                    Debug.LogWarning($"⚠️ [GiveCoinsToCharacter] 方法2调用失败: {ex.Message}");
-                                }
-                            }
-                        }
-                        Debug.Log($"⚠️ [GiveCoinsToCharacter] 方法2失败: 未找到合适的添加物品方法");
-                    }
-                    else
-                    {
-                        Debug.Log($"⚠️ [GiveCoinsToCharacter] 方法2失败: 未找到CharacterItemControl组件");
-                    }
+                    Debug.Log($"✅ [GiveCoinsToCharacter] 成功给 {character.gameObject.name} 添加 {amount} 金币");
+                    CheckCharacterCoinsAfterDelay(character, amount, 1f).Forget();
                 }
-                catch (Exception ex)
+                else
                 {
-                    Debug.LogWarning($"⚠️ [GiveCoinsToCharacter] 方法2失败: {ex.Message}");
+                    Debug.LogWarning($"⚠️ [GiveCoinsToCharacter] PickupItem返回false，可能背包已满或其他原因");
+                    coinItem.Detach(); // 清理物品
                 }
-                
-                // 方法3：放在角色脚下（备用方案）
-                Debug.Log($"🔄 [GiveCoinsToCharacter] 尝试方法3: 放在角色脚下（备用方案）...");
-                Vector3 targetPosition = character.transform.position + Vector3.up * 0.5f;
-                coinItem.transform.position = targetPosition;
-                
-                Debug.Log($"📍 [GiveCoinsToCharacter] 金币已放置在位置: {targetPosition}");
-                Debug.Log($"   💰 已将 {amount} 金币放置在 {character.gameObject.name} 脚下（备用方案）");
-                Debug.Log($"   ⚠️ 注意：角色可能不会自动捡起，需要手动验证");
-                
-                // 延迟检查角色是否捡到金币（1秒后）
-                CheckCharacterCoinsAfterDelay(character, amount, 1f).Forget();
             }
             catch (Exception ex)
             {
