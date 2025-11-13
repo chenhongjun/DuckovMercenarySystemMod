@@ -58,6 +58,10 @@ namespace DuckovMercenarySystemMod
         private Vector3 lastPlayerPosition = Vector3.zero; // 上次玩家位置（用于计算移动速度）
         private float playerMoveSpeed = 0f; // 玩家移动速度（米/秒）
         
+        // AI控制器缓存（避免每次Update都查找Transform和GetComponent）
+        // 注意：缓存的是组件对象引用，不是数据。每次通过反射读取字段值时都是实时读取，数据始终是最新的
+        private Dictionary<CharacterMainControl, Component> aiControllerCache = new Dictionary<CharacterMainControl, Component>();
+        
 #if ENABLE_DEBUG_FEATURES
         // 调试功能类（仅在定义了 ENABLE_DEBUG_FEATURES 时启用）
         private DebugFeatures? debugFeatures;
@@ -143,19 +147,39 @@ namespace DuckovMercenarySystemMod
             }
             lastPlayerPosition = playerPos;
             
-            // 清理已死亡或无效的友军
-            var invalidAllies = allies.Where(ally => ally == null || ally.gameObject == null).ToList();
-            foreach (var invalidAlly in invalidAllies)
-            {
-                lastResetTime.Remove(invalidAlly); // 清理重置时间记录
-            }
-            allies.RemoveAll(ally => ally == null || ally.gameObject == null);
+                // 清理已死亡或无效的友军
+                var invalidAllies = allies.Where(ally => ally == null || ally.gameObject == null).ToList();
+                foreach (var invalidAlly in invalidAllies)
+                {
+                    lastResetTime.Remove(invalidAlly); // 清理重置时间记录
+                    aiControllerCache.Remove(invalidAlly); // 清理AI控制器缓存
+                }
+                allies.RemoveAll(ally => ally == null || ally.gameObject == null);
             
             // 更新每个友军的移动
             foreach (var ally in allies)
             {
                 try
                 {
+                    // 🔑 关键检查：确保ally不是玩家自己
+                    if (ally == null || ally == player)
+                    {
+                        if (ally == player)
+                        {
+                            Debug.LogWarning($"[UpdateAlliesFollow] ⚠️ 发现玩家自己被添加到友军列表，跳过并移除");
+                            allies.Remove(ally);
+                        }
+                        continue;
+                    }
+                    
+                    // 验证对象ID（确保不是同一个对象）
+                    if (ally.GetInstanceID() == player.GetInstanceID())
+                    {
+                        Debug.LogWarning($"[UpdateAlliesFollow] ⚠️ 发现玩家和友军是同一个对象实例 (ID: {ally.GetInstanceID()})，跳过并移除");
+                        allies.Remove(ally);
+                        continue;
+                    }
+                    
                     UpdateAllyFollow(ally, player);
                 }
                 catch (Exception ex)
@@ -212,6 +236,7 @@ namespace DuckovMercenarySystemMod
                 
                 allies.Clear();
                 lastResetTime.Clear(); // 清理所有重置时间记录
+                aiControllerCache.Clear(); // 清理AI控制器缓存
                 bribeRecords.Clear(); // 清空贿赂记录
                 
                 Debug.Log($"✅ 已解散所有友军 (共 {count} 名)");
@@ -342,9 +367,13 @@ namespace DuckovMercenarySystemMod
         // ============================================
         
         /// <summary>
-        /// 计算玩家正前方指定距离的位置（用于友军跟随）
+        /// 获取玩家前方指定距离和角度的位置（用于友军跟随）
         /// </summary>
-        private Vector3 GetPlayerForwardPosition(CharacterMainControl player, float distance = 5f)
+        /// <param name="player">玩家对象</param>
+        /// <param name="distance">距离（米）</param>
+        /// <param name="angleOffset">角度偏移（度，0为正前方，顺时针为正）</param>
+        /// <returns>目标位置</returns>
+        private Vector3 GetPlayerForwardPosition(CharacterMainControl player, float distance = 5f, float angleOffset = 0f)
         {
             if (player == null)
             {
@@ -362,67 +391,84 @@ namespace DuckovMercenarySystemMod
                 forward = Vector3.forward;
             }
             
-            // 计算正前方位置
-            Vector3 forwardPos = player.transform.position + forward * distance;
-            return forwardPos;
+            // 如果有角度偏移，旋转方向向量
+            if (Mathf.Abs(angleOffset) > 0.01f)
+            {
+                Quaternion rotation = Quaternion.Euler(0f, angleOffset, 0f);
+                forward = rotation * forward;
+            }
+            
+            // 计算目标位置
+            Vector3 targetPos = player.transform.position + forward * distance;
+            return targetPos;
         }
         
         /// <summary>
-        /// 控制友军跟随玩家（核心修复：清除AI战斗状态，强制回到巡逻状态）
+        /// 控制友军跟随玩家（简化版：基于距离和速度的跟随策略）
         /// </summary>
         private void UpdateAllyFollow(CharacterMainControl ally, CharacterMainControl player)
         {
             try
             {
-                if (player == null)
+                if (ally == null || ally.gameObject == null || player == null)
                 {
                     return;
                 }
                 
-                // 计算玩家正前方5米的位置（友军跟随目标位置）
-                Vector3 targetPos = GetPlayerForwardPosition(player, 5f);
-                Vector3 playerPos = player.transform.position; // 保留用于距离计算
+                Vector3 playerPos = player.transform.position;
+                Vector3 allyPos = ally.transform.position;
+                float distanceToPlayer = Vector3.Distance(allyPos, playerPos);
                 
-                // 检查友军与玩家的距离
-                float distanceToPlayer = Vector3.Distance(ally.transform.position, playerPos);
-                
-                // 如果距离太远（>10米），需要强制重置AI状态
-                bool isTooFar = distanceToPlayer > 10f;
-                
-                // 查找AI控制器子对象
-                Transform aiController = ally.transform.Find("AIControllerTemplate(Clone)");
-                if (aiController == null)
+                // 🔑 保底策略：超过40米强制传送到玩家位置
+                if (distanceToPlayer > 40f)
                 {
-                    // 尝试查找包含"AI"的子对象
-                    foreach (Transform child in ally.transform)
+                    Vector3 teleportPos = playerPos + Vector3.up * 0.5f; // 稍微抬高避免卡地下
+                    ally.transform.position = teleportPos;
+                    Debug.Log($"[UpdateAllyFollow] ⚠️ 距离过远({distanceToPlayer:F2}米)，强制传送到玩家位置: {teleportPos}");
+                    return;
+                }
+                
+                // 获取或缓存AI控制器组件
+                Component aiCharacterController = null;
+                bool fromCache = aiControllerCache.TryGetValue(ally, out aiCharacterController);
+                
+                if (!fromCache)
+                {
+                    // 查找AI控制器子对象
+                    Transform aiController = ally.transform.Find("AIControllerTemplate(Clone)");
+                    if (aiController == null)
                     {
-                        if (child.name.ToLower().Contains("ai") && child.name.ToLower().Contains("controller"))
+                        // 尝试查找包含"AI"的子对象
+                        foreach (Transform child in ally.transform)
                         {
-                            aiController = child;
-                            break;
+                            string childName = child.name.ToLower();
+                            if (childName.Contains("ai") && childName.Contains("controller"))
+                            {
+                                aiController = child;
+                                break;
+                            }
                         }
                     }
-                }
-                
-                if (aiController == null)
-                {
-                    return;  // 没有AI控制器，跳过
-                }
-                
-                // 查找AICharacterController组件
-                Component aiCharacterController = aiController.GetComponent("AICharacterController");
-                if (aiCharacterController == null)
-                {
-                    return;  // 没有组件，跳过
+                    
+                    if (aiController == null)
+                    {
+                        return;  // 没有AI控制器，跳过
+                    }
+                    
+                    // 查找AICharacterController组件
+                    aiCharacterController = aiController.GetComponent("AICharacterController");
+                    if (aiCharacterController == null)
+                    {
+                        return;  // 没有组件，跳过
+                    }
+                    
+                    // 缓存AI控制器
+                    aiControllerCache[ally] = aiCharacterController;
                 }
                 
                 Type aiType = aiCharacterController.GetType();
                 
-                // 🔑 核心修复：清除AI的战斗/警戒状态，强制回到巡逻状态
-                // 问题原因：如果AI处于战斗状态（searchedEnemy != null）或警戒状态（noticed/alert = true），
-                // 它会优先执行战斗/警戒行为树，而不会响应patrolPosition的更新
-                
-                // 检查AI是否处于战斗/警戒状态
+                // 检查AI状态：战斗状态、巡逻状态等
                 FieldInfo searchedEnemyField = aiType.GetField("searchedEnemy", BindingFlags.Public | BindingFlags.Instance);
                 object currentEnemy = null;
                 if (searchedEnemyField != null)
@@ -437,182 +483,85 @@ namespace DuckovMercenarySystemMod
                     isNoticed = (bool)noticedField.GetValue(aiCharacterController);
                 }
                 
-                // 只在距离过远时强制重置AI状态（避免频繁重置导致AI无法正常战斗）
-                // 如果距离不远，即使AI在战斗也应该让它继续战斗，而不是强制重置
-                bool shouldResetAI = isTooFar;
+                bool isInCombat = currentEnemy != null || isNoticed;
                 
-                // 检查重置冷却时间（避免频繁重置）
-                if (shouldResetAI)
-                {
-                    if (lastResetTime.ContainsKey(ally))
-                    {
-                        float timeSinceLastReset = Time.time - lastResetTime[ally];
-                        if (timeSinceLastReset < resetCooldown)
-                        {
-                            shouldResetAI = false; // 还在冷却中，不重置
-                            if (Time.frameCount % 20 == 0)
-                            {
-                                Debug.Log($"[UpdateAllyFollow] {ally.gameObject.name} - 重置冷却中 ({timeSinceLastReset:F1}秒/{resetCooldown}秒)");
-                            }
-                        }
-                    }
-                }
+                // 🔑 简化策略：判断是否需要重置AI并移动
+                // 条件：玩家速度 > 4米/秒 且 距离 > 8米 且 (战斗状态 或 巡逻状态)
+                // 注意：如果不在战斗状态，那就是在巡逻状态，所以只要满足速度和距离条件就重置
+                bool shouldResetAndMove = (playerMoveSpeed > 4f && distanceToPlayer > 8f);
                 
-                // 添加详细日志（降低频率，避免刷屏）
-                if (Time.frameCount % 20 == 0) // 每20帧输出一次
+                if (shouldResetAndMove)
                 {
-                    Debug.Log($"[UpdateAllyFollow] {ally.gameObject.name} - 距离: {distanceToPlayer:F2}米, " +
-                             $"玩家速度: {playerMoveSpeed:F2}米/秒, " +
-                             $"isTooFar: {isTooFar}, " +
-                             $"currentEnemy: {(currentEnemy != null ? "有" : "无")}, " +
-                             $"isNoticed: {isNoticed}, " +
-                             $"shouldResetAI: {shouldResetAI}");
-                }
-                
-                if (shouldResetAI)
-                {
-                    Debug.Log($"[UpdateAllyFollow] 开始重置AI状态 - {ally.gameObject.name} (距离: {distanceToPlayer:F2}米, 速度: {playerMoveSpeed:F2}米/秒)");
+                    Debug.Log($"[UpdateAllyFollow] 🔄 重置AI并移动 - 玩家速度: {playerMoveSpeed:F2}米/秒, 距离: {distanceToPlayer:F2}米, 战斗状态: {isInCombat}");
                     
-                    // 1. 清除搜索到的敌人（让AI停止追踪敌人）
+                    // 重置AI状态：清除敌人、警戒状态
                     if (searchedEnemyField != null && currentEnemy != null)
                     {
                         searchedEnemyField.SetValue(aiCharacterController, null);
-                        Debug.Log($"[UpdateAllyFollow] 清除友军的searchedEnemy，强制回到巡逻状态 (距离: {distanceToPlayer:F2}米)");
                     }
                     
-                    // 2. 清除缓存的敌人
                     FieldInfo cachedSearchedEnemyField = aiType.GetField("cachedSearchedEnemy", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                     if (cachedSearchedEnemyField != null)
                     {
-                        object cachedEnemy = cachedSearchedEnemyField.GetValue(aiCharacterController);
-                        if (cachedEnemy != null)
-                        {
-                            cachedSearchedEnemyField.SetValue(aiCharacterController, null);
-                            Debug.Log($"[UpdateAllyFollow] 清除友军的cachedSearchedEnemy");
-                        }
+                        cachedSearchedEnemyField.SetValue(aiCharacterController, null);
                     }
                     
-                    // 3. 重置警戒状态（如果可写）
                     if (noticedField != null && isNoticed)
                     {
                         noticedField.SetValue(aiCharacterController, false);
-                        Debug.Log($"[UpdateAllyFollow] 重置友军的noticed状态为false");
                     }
                     
-                    // 4. 重置警戒标志（如果可写）
                     FieldInfo alertField = aiType.GetField("alert", BindingFlags.Public | BindingFlags.Instance);
                     if (alertField != null && alertField.FieldType == typeof(bool))
                     {
-                        bool isAlert = (bool)alertField.GetValue(aiCharacterController);
-                        if (isAlert)
-                        {
-                            alertField.SetValue(aiCharacterController, false);
-                            Debug.Log($"[UpdateAllyFollow] 重置友军的alert状态为false");
-                        }
+                        alertField.SetValue(aiCharacterController, false);
                     }
                     
-                    // 5. 尝试使用MoveToPos强制移动（如果可用，仅在距离太远时）
-                    if (isTooFar)
+                    // 让队友往玩家方向移动
+                    MethodInfo moveToPosMethod = aiType.GetMethod("MoveToPos", BindingFlags.Public | BindingFlags.Instance, null, new Type[] { typeof(Vector3) }, null);
+                    if (moveToPosMethod != null)
                     {
-                        MethodInfo moveToPosMethod = aiType.GetMethod("MoveToPos", BindingFlags.Public | BindingFlags.Instance, null, new Type[] { typeof(Vector3) }, null);
-                        if (moveToPosMethod != null)
+                        try
                         {
-                            // 检查是否在等待路径计算（避免冲突）
-                            MethodInfo waitingForPathMethod = aiType.GetMethod("WaitingForPathResult", BindingFlags.Public | BindingFlags.Instance);
-                            bool isWaitingForPath = false;
-                            if (waitingForPathMethod != null)
-                            {
-                                object result = waitingForPathMethod.Invoke(aiCharacterController, null);
-                                isWaitingForPath = result != null && (bool)result;
-                            }
-                            
-                            Debug.Log($"[UpdateAllyFollow] 距离过远，准备强制移动 - isWaitingForPath: {isWaitingForPath}, 距离: {distanceToPlayer:F2}米");
-                            
-                            // 如果不在等待路径计算，强制移动到玩家正前方位置
-                            if (!isWaitingForPath)
-                            {
-                                try
-                                {
-                                    moveToPosMethod.Invoke(aiCharacterController, new object[] { targetPos });
-                                    Debug.Log($"[UpdateAllyFollow] 已调用MoveToPos，目标位置（玩家正前方5米）: {targetPos}");
-                                    
-                                    // 如果距离非常远（>50米），尝试直接设置位置（作为最后手段）
-                                    if (distanceToPlayer > 50f)
-                                    {
-                                        Vector3 teleportPos = targetPos + Vector3.up * 0.5f; // 稍微抬高避免卡地下
-                                        ally.transform.position = teleportPos;
-                                        Debug.Log($"[UpdateAllyFollow] 距离过远({distanceToPlayer:F2}米)，直接传送友军到玩家正前方: {teleportPos}");
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Debug.LogError($"[UpdateAllyFollow] 调用MoveToPos时出错: {ex.Message}");
-                                    
-                                    // 如果MoveToPos失败且距离很远，尝试直接传送
-                                    if (distanceToPlayer > 50f)
-                                    {
-                                        Vector3 teleportPos = targetPos + Vector3.up * 0.5f;
-                                        ally.transform.position = teleportPos;
-                                        Debug.Log($"[UpdateAllyFollow] MoveToPos失败，直接传送友军到玩家正前方: {teleportPos}");
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                Debug.Log($"[UpdateAllyFollow] 友军正在等待路径计算，跳过强制移动");
-                                
-                                // 即使等待路径，如果距离非常远也直接传送
-                                if (distanceToPlayer > 50f)
-                                {
-                                    Vector3 teleportPos = targetPos + Vector3.up * 0.5f;
-                                    ally.transform.position = teleportPos;
-                                    Debug.Log($"[UpdateAllyFollow] 等待路径中但距离过远，直接传送友军到玩家正前方: {teleportPos}");
-                                }
-                            }
+                            // 计算朝向玩家的方向
+                            Vector3 directionToPlayer = (playerPos - allyPos).normalized;
+                            Vector3 targetPos = playerPos + directionToPlayer * 5f; // 玩家位置前方5米
+                            moveToPosMethod.Invoke(aiCharacterController, new object[] { targetPos });
+                            Debug.Log($"[UpdateAllyFollow] ✅ 已重置AI并移动到玩家方向: {targetPos}");
                         }
-                        else
+                        catch (Exception ex)
                         {
-                            Debug.Log($"[UpdateAllyFollow] 未找到MoveToPos方法，无法强制移动");
-                            
-                            // 如果没有MoveToPos方法且距离很远，直接传送
-                            if (distanceToPlayer > 50f)
-                            {
-                                Vector3 teleportPos = targetPos + Vector3.up * 0.5f;
-                                ally.transform.position = teleportPos;
-                                Debug.Log($"[UpdateAllyFollow] 无MoveToPos方法，直接传送友军到玩家正前方: {teleportPos}");
-                            }
+                            Debug.LogWarning($"[UpdateAllyFollow] ⚠️ MoveToPos调用失败: {ex.Message}");
                         }
                     }
-                    
-                    // 记录重置时间（用于冷却）
-                    lastResetTime[ally] = Time.time;
                 }
                 
-                // 更新巡逻位置为玩家正前方5米位置（正常跟随逻辑）
-                UpdateAIPatrolPosition(aiCharacterController, targetPos);
-                
-                // 优化：设置AI朝向移动方向，避免倒着走路
-                // 只在非战斗状态或距离较远时设置朝向（避免干扰战斗）
-                bool isInCombat = currentEnemy != null || isNoticed;
-                if (!isInCombat || distanceToPlayer > 5f)
+                // 🔑 设置玩家位置为巡逻中心点，巡逻范围改为5米
+                FieldInfo patrolPosField = aiType.GetField("patrolPosition", BindingFlags.Public | BindingFlags.Instance);
+                if (patrolPosField != null && patrolPosField.FieldType == typeof(Vector3))
                 {
-                    // 计算从友军到目标位置的方向（忽略Y轴高度差）
-                    Vector3 allyPos = ally.transform.position;
-                    Vector3 directionToTarget = targetPos - allyPos;
-                    directionToTarget.y = 0f; // 只在水平面计算方向
-                    
-                    // 如果距离足够远，设置朝向
-                    if (directionToTarget.magnitude > 0.1f)
-                    {
-                        Quaternion targetRotation = Quaternion.LookRotation(directionToTarget.normalized);
-                        // 平滑旋转，避免突然转向（旋转速度：每秒5倍）
-                        ally.transform.rotation = Quaternion.Slerp(ally.transform.rotation, targetRotation, Time.deltaTime * 5f);
-                    }
+                    patrolPosField.SetValue(aiCharacterController, playerPos);
+                }
+                
+                FieldInfo patrolRangeField = aiType.GetField("patrolRange", BindingFlags.Public | BindingFlags.Instance);
+                if (patrolRangeField != null && patrolRangeField.FieldType == typeof(float))
+                {
+                    patrolRangeField.SetValue(aiCharacterController, 5f);
+                }
+                
+                // 🔑 设置队友朝向：面向玩家方向（让走路时面向前方）
+                Vector3 lookDirection = (playerPos - allyPos);
+                lookDirection.y = 0f; // 只在水平面计算方向，忽略高度差
+                if (lookDirection.magnitude > 0.1f) // 确保方向向量有效
+                {
+                    Quaternion targetRotation = Quaternion.LookRotation(lookDirection.normalized);
+                    // 平滑旋转，避免突然转向（旋转速度：每秒10倍）
+                    ally.transform.rotation = Quaternion.Slerp(ally.transform.rotation, targetRotation, Time.deltaTime * 10f);
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"控制友军跟随时出错: {ex.Message}");
+                Debug.LogError($"[UpdateAllyFollow] ❌ 异常分支：控制友军跟随时出错: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -855,31 +804,76 @@ namespace DuckovMercenarySystemMod
             GameObject playerByTag = GameObject.FindGameObjectWithTag("Player");
             if (playerByTag != null)
             {
-                return playerByTag;
+                CharacterMainControl charControl = playerByTag.GetComponent<CharacterMainControl>();
+                if (charControl != null)
+                {
+                    // 检查IsMainCharacter属性
+                    Type charType = charControl.GetType();
+                    PropertyInfo isMainCharProp = charType.GetProperty("IsMainCharacter", BindingFlags.Public | BindingFlags.Instance);
+                    if (isMainCharProp != null)
+                    {
+                        object isMainValue = isMainCharProp.GetValue(charControl);
+                        if (isMainValue != null && Convert.ToBoolean(isMainValue))
+                        {
+                            Debug.Log($"[GetPlayerObject] ✅ 通过Tag和IsMainCharacter找到玩家: {playerByTag.name} (ID: {charControl.GetInstanceID()})");
+                            return playerByTag;
+                        }
+                    }
+                }
             }
 
-            // 方法2：尝试通过名称查找
+            // 方法2：遍历所有CharacterMainControl，优先找IsMainCharacter为True的
+            CharacterMainControl[] allCharacters = FindObjectsOfType<CharacterMainControl>();
+            CharacterMainControl mainCharacter = null;
+            CharacterMainControl playerTeamCharacter = null;
+            
+            foreach (var character in allCharacters)
+            {
+                if (character == null) continue;
+                
+                Type charType = character.GetType();
+                PropertyInfo isMainCharProp = charType.GetProperty("IsMainCharacter", BindingFlags.Public | BindingFlags.Instance);
+                
+                // 优先查找IsMainCharacter为True的
+                if (isMainCharProp != null)
+                {
+                    object isMainValue = isMainCharProp.GetValue(character);
+                    if (isMainValue != null && Convert.ToBoolean(isMainValue))
+                    {
+                        mainCharacter = character;
+                        Debug.Log($"[GetPlayerObject] ✅ 通过IsMainCharacter找到主玩家: {character.gameObject.name} (ID: {character.GetInstanceID()}, Team: {character.Team})");
+                        return character.gameObject;
+                    }
+                }
+                
+                // 备选：查找team为player的
+                string teamName = character.Team.ToString().ToLower();
+                if ((teamName == "player" || teamName.Contains("player")) && playerTeamCharacter == null)
+                {
+                    playerTeamCharacter = character;
+                }
+            }
+            
+            // 如果找到team为player的，返回它
+            if (playerTeamCharacter != null)
+            {
+                Debug.Log($"[GetPlayerObject] ✅ 通过Team找到玩家: {playerTeamCharacter.gameObject.name} (ID: {playerTeamCharacter.GetInstanceID()}, Team: {playerTeamCharacter.Team})");
+                return playerTeamCharacter.gameObject;
+            }
+            
+            // 方法3：尝试通过名称查找（最后备选）
             GameObject playerByName = GameObject.Find("Character(Clone)");
             if (playerByName != null)
             {
                 CharacterMainControl charControl = playerByName.GetComponent<CharacterMainControl>();
                 if (charControl != null && charControl.Team.ToString().ToLower() == "player")
                 {
+                    Debug.Log($"[GetPlayerObject] ⚠️ 通过名称找到玩家（可能不准确）: {playerByName.name} (ID: {charControl.GetInstanceID()})");
                     return playerByName;
                 }
             }
 
-            // 方法3：遍历所有CharacterMainControl，找team为player的
-            CharacterMainControl[] allCharacters = FindObjectsOfType<CharacterMainControl>();
-            foreach (var character in allCharacters)
-            {
-                string teamName = character.Team.ToString().ToLower();
-                if (teamName == "player" || teamName.Contains("player"))
-                {
-                    return character.gameObject;
-                }
-            }
-
+            Debug.LogWarning($"[GetPlayerObject] ⚠️ 未找到玩家对象 (共检查了 {allCharacters.Length} 个角色)");
             return null;
         }
 
@@ -920,6 +914,13 @@ namespace DuckovMercenarySystemMod
                 Debug.Log($"🎉 贿赂成功！{enemy.gameObject.name} 现在为你效力！");
                 Debug.Log($"   转换阵营: {enemy.Team} → {playerTeam}");
 
+                // 🔑 关键检查：确保不会把玩家自己添加到友军列表
+                if (enemy == player || enemy.GetInstanceID() == player.GetInstanceID())
+                {
+                    Debug.LogError($"❌ 错误：尝试将玩家自己添加到友军列表！玩家ID: {player.GetInstanceID()}, 敌人ID: {enemy.GetInstanceID()}, 玩家名称: {player.gameObject.name}, 敌人名称: {enemy.gameObject.name}");
+                    return;
+                }
+
                 // 转换阵营
                 enemy.SetTeam(playerTeam);
 
@@ -927,7 +928,11 @@ namespace DuckovMercenarySystemMod
                 if (!allies.Contains(enemy))
                 {
                     allies.Add(enemy);
-                    Debug.Log($"   ✅ 已添加到友军列表 (当前友军数: {allies.Count})");
+                    Debug.Log($"   ✅ 已添加到友军列表 (当前友军数: {allies.Count}, 敌人ID: {enemy.GetInstanceID()}, 玩家ID: {player.GetInstanceID()})");
+                }
+                else
+                {
+                    Debug.LogWarning($"   ⚠️ 友军已在列表中，跳过添加 (敌人ID: {enemy.GetInstanceID()})");
                 }
 
                 // 设置友军AI
@@ -1011,12 +1016,12 @@ namespace DuckovMercenarySystemMod
                     Vector3 oldPos = (Vector3)patrolPosField.GetValue(aiController);
                     float distance = Vector3.Distance(oldPos, newPosition);
                     
-                    // 优化1：降低距离阈值（从1米降到0.3米），提高响应速度
-                    // 优化2：如果距离太远（>5米），强制更新（防止跟丢）
-                    bool shouldUpdate = distance > 0.3f; // 距离超过0.3米就更新
+                    // 🔑 关键修复：强制更新巡逻位置，无论距离如何
+                    // 问题：如果阈值太高，AI可能不会响应位置变化
+                    // 解决方案：每次调用都强制更新，确保AI始终跟随玩家
+                    bool shouldUpdate = true; // 强制更新，不再使用阈值判断
                     
-                    // 添加低频日志（每30帧输出一次，或距离变化较大时）
-                    if ((Time.frameCount % 30 == 0 || distance > 2f) && !silent)
+                    if (!silent || distance > 0.1f) // 降低日志频率，但距离变化时输出
                     {
                         Debug.Log($"[UpdateAIPatrolPosition] 巡逻位置检查 - 旧位置: {oldPos}, 新位置: {newPosition}, 距离: {distance:F2}米, shouldUpdate: {shouldUpdate}");
                     }
@@ -1025,19 +1030,25 @@ namespace DuckovMercenarySystemMod
                     {
                         patrolPosField.SetValue(aiController, newPosition);
                         
-                        if (!silent)
+                        // 验证设置是否成功
+                        Vector3 verifyPos = (Vector3)patrolPosField.GetValue(aiController);
+                        float verifyDistance = Vector3.Distance(verifyPos, newPosition);
+                        
+                        if (!silent || distance > 0.1f)
                         {
-                            Debug.Log($"      ✅ patrolPosition: {oldPos} → {newPosition} (距离: {distance:F2}米)");
+                            Debug.Log($"[UpdateAIPatrolPosition] ✅ 已更新巡逻位置: {oldPos} → {newPosition} (距离: {distance:F2}米, 验证距离: {verifyDistance:F2}米)");
                         }
-                        else if (distance > 2f) // 距离变化较大时也输出日志
+                        
+                        // 如果验证失败，输出警告
+                        if (verifyDistance > 0.1f)
                         {
-                            Debug.Log($"[UpdateAIPatrolPosition] 更新巡逻位置: {oldPos} → {newPosition} (距离: {distance:F2}米)");
+                            Debug.LogWarning($"[UpdateAIPatrolPosition] ⚠️ 巡逻位置设置后验证失败: 期望 {newPosition}, 实际 {verifyPos}, 距离: {verifyDistance:F2}米");
                         }
                     }
                 }
-                else if (!silent)
+                else
                 {
-                    Debug.Log($"      ⚠️ 未找到patrolPosition字段");
+                    Debug.LogWarning($"[UpdateAIPatrolPosition] ⚠️ 未找到patrolPosition字段 (字段存在: {patrolPosField != null}, 类型: {(patrolPosField != null ? patrolPosField.FieldType.Name : "null")})");
                 }
                 
                 // 优化3：根据玩家移动速度动态调整巡逻范围
@@ -1064,12 +1075,18 @@ namespace DuckovMercenarySystemMod
                     if (Mathf.Abs(currentRange - targetRange) > 0.5f)
                     {
                         patrolRangeField.SetValue(aiController, targetRange);
-                        Debug.Log($"[UpdateAIPatrolPosition] 更新巡逻范围: {currentRange} → {targetRange}米 (玩家速度: {playerMoveSpeed:F2}米/秒)");
+                        Debug.Log($"[UpdateAIPatrolPosition] ✅ 更新巡逻范围: {currentRange} → {targetRange}米 (玩家速度: {playerMoveSpeed:F2}米/秒)");
                     }
-                    else if (Time.frameCount % 60 == 0 && !silent) // 每60帧输出一次当前范围
+                    
+                    // 每帧都输出当前范围（用于诊断）
+                    if (!silent || Time.frameCount % 20 == 0)
                     {
-                        Debug.Log($"[UpdateAIPatrolPosition] 当前巡逻范围: {currentRange}米, 目标范围: {targetRange}米 (玩家速度: {playerMoveSpeed:F2}米/秒)");
+                        Debug.Log($"[UpdateAIPatrolPosition] 📊 巡逻范围信息 - 当前范围: {currentRange}米, 目标范围: {targetRange}米, 玩家速度: {playerMoveSpeed:F2}米/秒");
                     }
+                }
+                else
+                {
+                    Debug.LogWarning($"[UpdateAIPatrolPosition] ⚠️ 未找到patrolRange字段 (字段存在: {patrolRangeField != null}, 类型: {(patrolRangeField != null ? patrolRangeField.FieldType.Name : "null")})");
                 }
             }
             catch (Exception ex)
