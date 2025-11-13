@@ -21,6 +21,17 @@ namespace DuckovMercenarySystemMod
         private int maxRequiredAmount = 800;      // 每个敌人最高报价
         private float bribeRange = 4f;             // 贿赂范围（米）- 俯视图游戏用靠近方式
         
+        // 按键配置（支持改键）
+        private KeyCode bribeKey = KeyCode.E;      // 贿赂按键（默认E）
+        private KeyCode dismissKey = KeyCode.Q;    // 解散按键（默认Q）
+        private const string PREFS_BRIBE_KEY = "DuckovMercenary_BribeKey";      // PlayerPrefs键名
+        private const string PREFS_DISMISS_KEY = "DuckovMercenary_DismissKey";  // PlayerPrefs键名
+        
+        // 设置界面相关
+        private bool showSettingsGUI = false;       // 是否显示设置界面
+        private bool isWaitingForKey = false;      // 是否正在等待按键输入
+        private string waitingForKeyType = "";      // 等待设置的按键类型（"bribe"或"dismiss"）
+        
         // 物品ID常量
         private const int ITEM_ID_COIN = 451;      // 金币ID
         
@@ -69,12 +80,16 @@ namespace DuckovMercenarySystemMod
 
         void Awake()
         {
+            // 加载按键配置（从PlayerPrefs读取，如果没有则使用默认值）
+            LoadKeyBindings();
+            
             Debug.Log("=== 雇佣兵系统Mod v1.8 已加载 ===");
             Debug.Log("功能说明：");
-            Debug.Log($"  E键 - 靠近敌人后按E贿赂（每次 {perBribeAmount} 金币，范围{bribeRange}米）");
+            Debug.Log($"  {bribeKey}键 - 靠近敌人后按{bribeKey}贿赂（每次 {perBribeAmount} 金币，范围{bribeRange}米）");
             Debug.Log($"  转换条件：敌人随机要价 {minRequiredAmount}-{maxRequiredAmount} 金币，凑够后有概率招募（失败越多越倔强）");
             Debug.Log($"  ✅ 友军保留完整AI智能（会攻击、会躲避、自然移动）");
-            Debug.Log($"  Q键 - 解散所有友军");
+            Debug.Log($"  {dismissKey}键 - 解散所有友军");
+            Debug.Log($"  改键方法：调用 SetBribeKey(KeyCode) 和 SetDismissKey(KeyCode) 方法");
 #if ENABLE_DEBUG_FEATURES
             debugFeatures = new DebugFeatures(this);
             string debugDesc = debugFeatures.GetDebugFeaturesDescription();
@@ -91,16 +106,67 @@ namespace DuckovMercenarySystemMod
 
         void Update()
         {
-            // E键 - 贿赂敌人
-            if (Input.GetKeyDown(KeyCode.E))
+            // F10键 - 打开/关闭设置界面
+            if (Input.GetKeyDown(KeyCode.F10))
             {
-                TryBribeEnemy();
+                showSettingsGUI = !showSettingsGUI;
+                if (showSettingsGUI)
+                {
+                    Debug.Log("[设置] 设置界面已打开，按F10关闭");
+                }
+                else
+                {
+                    isWaitingForKey = false;
+                    Debug.Log("[设置] 设置界面已关闭");
+                }
             }
             
-            // Q键 - 解散所有友军
-            if (Input.GetKeyDown(KeyCode.Q))
+            // 如果正在等待按键输入，检测按键
+            if (isWaitingForKey)
             {
-                DismissAllAllies();
+                // 检测所有按键（排除鼠标按键）
+                foreach (KeyCode keyCode in System.Enum.GetValues(typeof(KeyCode)))
+                {
+                    if (Input.GetKeyDown(keyCode))
+                    {
+                        // 排除特殊按键
+                        if (keyCode == KeyCode.Mouse0 || keyCode == KeyCode.Mouse1 || 
+                            keyCode == KeyCode.Mouse2 || keyCode == KeyCode.Mouse3 ||
+                            keyCode == KeyCode.Mouse4 || keyCode == KeyCode.Mouse5 ||
+                            keyCode == KeyCode.Mouse6)
+                        {
+                            continue;
+                        }
+                        
+                        // 设置按键
+                        if (waitingForKeyType == "bribe")
+                        {
+                            SetBribeKey(keyCode);
+                        }
+                        else if (waitingForKeyType == "dismiss")
+                        {
+                            SetDismissKey(keyCode);
+                        }
+                        
+                        isWaitingForKey = false;
+                        waitingForKeyType = "";
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                // 贿赂按键 - 贿赂敌人
+                if (Input.GetKeyDown(bribeKey))
+                {
+                    TryBribeEnemy();
+                }
+                
+                // 解散按键 - 解散所有友军
+                if (Input.GetKeyDown(dismissKey))
+                {
+                    DismissAllAllies();
+                }
             }
             
 #if ENABLE_DEBUG_FEATURES
@@ -273,6 +339,176 @@ namespace DuckovMercenarySystemMod
             }
 
             return null;
+        }
+        
+        /// <summary>
+        /// 加载按键配置（从PlayerPrefs读取）
+        /// </summary>
+        private void LoadKeyBindings()
+        {
+            // 从PlayerPrefs读取按键配置，如果没有则使用默认值
+            if (PlayerPrefs.HasKey(PREFS_BRIBE_KEY))
+            {
+                int bribeKeyInt = PlayerPrefs.GetInt(PREFS_BRIBE_KEY, (int)KeyCode.E);
+                bribeKey = (KeyCode)bribeKeyInt;
+            }
+            
+            if (PlayerPrefs.HasKey(PREFS_DISMISS_KEY))
+            {
+                int dismissKeyInt = PlayerPrefs.GetInt(PREFS_DISMISS_KEY, (int)KeyCode.Q);
+                dismissKey = (KeyCode)dismissKeyInt;
+            }
+        }
+        
+        /// <summary>
+        /// 设置贿赂按键（支持改键）
+        /// </summary>
+        /// <param name="keyCode">新的按键</param>
+        public void SetBribeKey(KeyCode keyCode)
+        {
+            bribeKey = keyCode;
+            PlayerPrefs.SetInt(PREFS_BRIBE_KEY, (int)keyCode);
+            PlayerPrefs.Save();
+            Debug.Log($"[改键] 贿赂按键已设置为: {keyCode}");
+        }
+        
+        /// <summary>
+        /// 设置解散按键（支持改键）
+        /// </summary>
+        /// <param name="keyCode">新的按键</param>
+        public void SetDismissKey(KeyCode keyCode)
+        {
+            dismissKey = keyCode;
+            PlayerPrefs.SetInt(PREFS_DISMISS_KEY, (int)keyCode);
+            PlayerPrefs.Save();
+            Debug.Log($"[改键] 解散按键已设置为: {keyCode}");
+        }
+        
+        /// <summary>
+        /// 获取当前贿赂按键
+        /// </summary>
+        public KeyCode GetBribeKey()
+        {
+            return bribeKey;
+        }
+        
+        /// <summary>
+        /// 获取当前解散按键
+        /// </summary>
+        public KeyCode GetDismissKey()
+        {
+            return dismissKey;
+        }
+        
+        /// <summary>
+        /// 重置按键为默认值（E和Q）
+        /// </summary>
+        public void ResetKeyBindings()
+        {
+            SetBribeKey(KeyCode.E);
+            SetDismissKey(KeyCode.Q);
+            Debug.Log("[改键] 按键已重置为默认值（E和Q）");
+        }
+        
+        /// <summary>
+        /// 开始等待按键输入（用于设置界面）
+        /// </summary>
+        private void StartWaitingForKey(string keyType)
+        {
+            isWaitingForKey = true;
+            waitingForKeyType = keyType;
+            Debug.Log($"[设置] 请按下要设置为{keyType}的按键...");
+        }
+        
+        /// <summary>
+        /// 绘制设置界面GUI
+        /// </summary>
+        void OnGUI()
+        {
+            if (!showSettingsGUI) return;
+            
+            // 设置窗口大小和位置
+            float windowWidth = 400f;
+            float windowHeight = 300f;
+            float windowX = (Screen.width - windowWidth) / 2f;
+            float windowY = (Screen.height - windowHeight) / 2f;
+            
+            // 创建窗口
+            Rect windowRect = new Rect(windowX, windowY, windowWidth, windowHeight);
+            GUI.Window(0, windowRect, DrawSettingsWindow, "雇佣兵系统Mod - 按键设置");
+        }
+        
+        /// <summary>
+        /// 绘制设置窗口内容
+        /// </summary>
+        void DrawSettingsWindow(int windowID)
+        {
+            GUILayout.BeginVertical();
+            GUILayout.Space(10);
+            
+            // 标题
+            GUILayout.Label("按键设置", new GUIStyle(GUI.skin.label) { fontSize = 18, fontStyle = FontStyle.Bold });
+            GUILayout.Space(10);
+            
+            // 分隔线
+            GUILayout.Box("", GUILayout.ExpandWidth(true), GUILayout.Height(1));
+            GUILayout.Space(10);
+            
+            // 当前按键显示
+            GUILayout.Label($"当前贿赂按键: {bribeKey}", GUI.skin.label);
+            GUILayout.Label($"当前解散按键: {dismissKey}", GUI.skin.label);
+            GUILayout.Space(10);
+            
+            // 等待按键提示
+            if (isWaitingForKey)
+            {
+                string keyTypeName = waitingForKeyType == "bribe" ? "贿赂" : "解散";
+                GUILayout.Label($"正在等待按键输入... ({keyTypeName})", new GUIStyle(GUI.skin.label) { normal = { textColor = Color.yellow } });
+                GUILayout.Space(5);
+            }
+            
+            // 按钮区域
+            GUILayout.BeginHorizontal();
+            
+            // 设置贿赂按键按钮
+            if (GUILayout.Button($"设置贿赂按键 ({bribeKey})", GUILayout.Height(30)))
+            {
+                StartWaitingForKey("bribe");
+            }
+            
+            // 设置解散按键按钮
+            if (GUILayout.Button($"设置解散按键 ({dismissKey})", GUILayout.Height(30)))
+            {
+                StartWaitingForKey("dismiss");
+            }
+            
+            GUILayout.EndHorizontal();
+            GUILayout.Space(10);
+            
+            // 重置按钮
+            if (GUILayout.Button("重置为默认值 (E/Q)", GUILayout.Height(30)))
+            {
+                ResetKeyBindings();
+            }
+            
+            GUILayout.Space(10);
+            
+            // 关闭按钮
+            if (GUILayout.Button("关闭 (F10)", GUILayout.Height(30)))
+            {
+                showSettingsGUI = false;
+                isWaitingForKey = false;
+            }
+            
+            GUILayout.Space(10);
+            
+            // 提示信息
+            GUILayout.Label("提示：按F10可随时打开/关闭此设置界面", new GUIStyle(GUI.skin.label) { fontSize = 11, normal = { textColor = Color.gray } });
+            
+            GUILayout.EndVertical();
+            
+            // 允许拖动窗口
+            GUI.DragWindow();
         }
         
         /// <summary>
