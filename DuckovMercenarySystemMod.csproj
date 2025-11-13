@@ -7,7 +7,8 @@
         <!-- For Windows users, please fill the folder path which contains Duckov.exe below -->
         <!-- Windows 用户请在下面这行填写你的鸭科夫安装路径（包含 Duckov.exe 的目录），这样编译器就能找到相关的 dll 文件 -->
         <!-- C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov -->
-        <DuckovPath>D:\SteamLibrary\steamapps\common\Escape from Duckov</DuckovPath>
+        <!-- D:\SteamLibrary\steamapps\common\Escape from Duckov -->
+        <DuckovPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov</DuckovPath>
 
         <!-- For Mac users, please fill the folder path which contains Duckov.app below -->
         <!-- Mac 用户请在下面这行填写你的鸭科夫安装路径（包含 Duckov.app 的目录）-->
@@ -17,6 +18,16 @@
         <SubPath Condition="'$(IsMac)' == 'true'">/Duckov.app/Contents/Resources/Data/Managed/</SubPath>
 
     </PropertyGroup>
+    
+    <!-- Debug 配置：启用调试功能 -->
+    <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+        <DefineConstants>$(DefineConstants);ENABLE_DEBUG_FEATURES</DefineConstants>
+    </PropertyGroup>
+    
+    <!-- Release 配置：不定义 ENABLE_DEBUG_FEATURES（调试功能代码会被排除） -->
+    <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+        <!-- Release 配置不定义 ENABLE_DEBUG_FEATURES，调试功能代码会被完全排除 -->
+    </PropertyGroup>
     <ItemGroup>
         <Reference Include="$(DuckovPath)$(SubPath)TeamSoda.*"/>
         <Reference Include="$(DuckovPath)$(SubPath)ItemStatsSystem.dll"/>
@@ -24,13 +35,15 @@
         <Reference Include="$(DuckovPath)$(SubPath)UniTask.dll"/>
     </ItemGroup>
 
-    <Target Name="CopyModDll" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <!-- Debug 和 Release 配置都拷贝 DLL 到 ReleaseExample 目录 -->
+    <Target Name="CopyModDll" AfterTargets="Build">
         <PropertyGroup>
             <ModOutputDir>$(MSBuildProjectDirectory)\ReleaseExample\DuckovMercenarySystemMod</ModOutputDir>
             <ModAssembly>$(TargetDir)$(AssemblyName).dll</ModAssembly>
         </PropertyGroup>
         <MakeDir Directories="$(ModOutputDir)" />
         <Copy SourceFiles="$(ModAssembly)" DestinationFolder="$(ModOutputDir)" SkipUnchangedFiles="true" />
+        <Message Text="已复制 $(Configuration) 配置的 DLL 到 $(ModOutputDir)" Importance="normal" />
     </Target>
 </Project>
 
