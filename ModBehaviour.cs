@@ -1032,33 +1032,52 @@ namespace DuckovMercenarySystemMod
         }
 
         /// <summary>
-        /// 获取玩家对象（多种方法尝试）
+        /// 获取玩家对象（使用路径查找，避免遍历所有对象）
+        /// 从日志分析：玩家路径为 MultiSceneCore/Base/Character(Clone)
         /// </summary>
         private GameObject GetPlayerObject()
         {
-            // 方法1：尝试通过Tag查找
-            GameObject playerByTag = GameObject.FindGameObjectWithTag("Player");
-            if (playerByTag != null)
+            // 方法1：通过路径查找（最快，无需遍历）
+            // 路径: MultiSceneCore/Base/Character(Clone)
+            // 先找到根对象 MultiSceneCore，然后通过路径查找
+            GameObject rootObj = GameObject.Find("MultiSceneCore");
+            if (rootObj != null)
             {
-                CharacterMainControl charControl = playerByTag.GetComponent<CharacterMainControl>();
-                if (charControl != null)
+                Transform baseTransform = rootObj.transform.Find("Base");
+                if (baseTransform != null)
                 {
-                    // 检查IsMainCharacter属性
-                    Type charType = charControl.GetType();
-                    PropertyInfo isMainCharProp = charType.GetProperty("IsMainCharacter", BindingFlags.Public | BindingFlags.Instance);
-                    if (isMainCharProp != null)
+                    Transform playerTransform = baseTransform.Find("Character(Clone)");
+                    if (playerTransform != null)
                     {
-                        object isMainValue = isMainCharProp.GetValue(charControl);
-                        if (isMainValue != null && Convert.ToBoolean(isMainValue))
+                        CharacterMainControl charControl = playerTransform.GetComponent<CharacterMainControl>();
+                        if (charControl != null)
                         {
-                            Debug.Log($"[GetPlayerObject] ✅ 通过Tag和IsMainCharacter找到玩家: {playerByTag.name} (ID: {charControl.GetInstanceID()})");
-                            return playerByTag;
+                            // 验证IsMainCharacter属性
+                            Type charType = charControl.GetType();
+                            PropertyInfo isMainCharProp = charType.GetProperty("IsMainCharacter", BindingFlags.Public | BindingFlags.Instance);
+                            if (isMainCharProp != null)
+                            {
+                                object isMainValue = isMainCharProp.GetValue(charControl);
+                                if (isMainValue != null && Convert.ToBoolean(isMainValue))
+                                {
+                                    Debug.Log($"[GetPlayerObject] ✅ 通过路径找到主玩家: {playerTransform.name} (ID: {charControl.GetInstanceID()})");
+                                    return playerTransform.gameObject;
+                                }
+                            }
+                            
+                            // 备选：检查Team属性
+                            if (charControl.Team.ToString().ToLower() == "player")
+                            {
+                                Debug.Log($"[GetPlayerObject] ✅ 通过路径和Team找到玩家: {playerTransform.name} (ID: {charControl.GetInstanceID()})");
+                                return playerTransform.gameObject;
+                            }
                         }
                     }
                 }
             }
-
-            // 方法2：遍历所有CharacterMainControl，优先找IsMainCharacter为True的
+            
+            // 方法2：遍历所有CharacterMainControl（备选，开销较大）
+            // 仅在路径查找失败时使用
             CharacterMainControl[] allCharacters = FindObjectsOfType<CharacterMainControl>();
             CharacterMainControl mainCharacter = null;
             CharacterMainControl playerTeamCharacter = null;
@@ -1076,8 +1095,7 @@ namespace DuckovMercenarySystemMod
                     object isMainValue = isMainCharProp.GetValue(character);
                     if (isMainValue != null && Convert.ToBoolean(isMainValue))
                     {
-                        mainCharacter = character;
-                        Debug.Log($"[GetPlayerObject] ✅ 通过IsMainCharacter找到主玩家: {character.gameObject.name} (ID: {character.GetInstanceID()}, Team: {character.Team})");
+                        Debug.Log($"[GetPlayerObject] ✅ 通过FindObjectsOfType和IsMainCharacter找到主玩家: {character.gameObject.name} (ID: {character.GetInstanceID()}, Team: {character.Team})");
                         return character.gameObject;
                     }
                 }
@@ -1093,22 +1111,10 @@ namespace DuckovMercenarySystemMod
             // 如果找到team为player的，返回它
             if (playerTeamCharacter != null)
             {
-                Debug.Log($"[GetPlayerObject] ✅ 通过Team找到玩家: {playerTeamCharacter.gameObject.name} (ID: {playerTeamCharacter.GetInstanceID()}, Team: {playerTeamCharacter.Team})");
+                Debug.Log($"[GetPlayerObject] ✅ 通过FindObjectsOfType和Team找到玩家: {playerTeamCharacter.gameObject.name} (ID: {playerTeamCharacter.GetInstanceID()}, Team: {playerTeamCharacter.Team})");
                 return playerTeamCharacter.gameObject;
             }
             
-            // 方法3：尝试通过名称查找（最后备选）
-            GameObject playerByName = GameObject.Find("Character(Clone)");
-            if (playerByName != null)
-            {
-                CharacterMainControl charControl = playerByName.GetComponent<CharacterMainControl>();
-                if (charControl != null && charControl.Team.ToString().ToLower() == "player")
-                {
-                    Debug.Log($"[GetPlayerObject] ⚠️ 通过名称找到玩家（可能不准确）: {playerByName.name} (ID: {charControl.GetInstanceID()})");
-                    return playerByName;
-                }
-            }
-
             Debug.LogWarning($"[GetPlayerObject] ⚠️ 未找到玩家对象 (共检查了 {allCharacters.Length} 个角色)");
             return null;
         }
