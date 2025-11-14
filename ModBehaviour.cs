@@ -57,6 +57,33 @@ namespace DuckovMercenarySystemMod
         // 缓存玩家对象（避免重复获取）
         private CharacterMainControl? cachedPlayer = null;
         
+        // 队友快照数据（用于跨场景复制重建）
+        [System.Serializable]
+        public struct AllySnapshot
+        {
+            // 基础信息
+            public Vector3 position;
+            public Quaternion rotation;
+            public Teams team;
+            
+            // 外观数据
+            public string modelName;
+            public string characterPresetName;
+            
+            // 状态数据
+            public float currentHealth;
+            public float maxHealth;
+            
+            // 装备数据（简化：只保存TypeID）
+            public List<int> equipmentTypeIds;  // 护甲、头盔、面罩、背包、耳机
+            
+            // 武器数据
+            public List<(int slotHash, int itemTypeId)> weaponList;
+        }
+        
+        // 保存的队友快照列表（静态，跨场景保持）
+        private static List<AllySnapshot> savedAllySnapshots = new List<AllySnapshot>();
+        
         // AI状态重置冷却时间（避免频繁重置）
         private Dictionary<CharacterMainControl, float> lastResetTime = new Dictionary<CharacterMainControl, float>();
         private float resetCooldown = 2f;          // 重置冷却时间（秒）
@@ -100,6 +127,8 @@ namespace DuckovMercenarySystemMod
             Debug.Log($"  转换条件：敌人随机要价 {minRequiredAmount}-{maxRequiredAmount} 金币，凑够后有概率招募（失败越多越倔强）");
             Debug.Log($"  ✅ 友军保留完整AI智能（会攻击、会躲避、自然移动）");
             Debug.Log($"  {dismissKey}键 - 解散所有友军");
+            Debug.Log($"  F2键 - 复制所有队友（保存快照，支持跨场景）");
+            Debug.Log($"  F3键 - 重建队友（从快照恢复，支持跨场景）");
             Debug.Log($"  改键方法：调用 SetBribeKey(KeyCode) 和 SetDismissKey(KeyCode) 方法");
 #if ENABLE_DEBUG_FEATURES
             debugFeatures = new DebugFeatures(this);
@@ -1750,6 +1779,341 @@ namespace DuckovMercenarySystemMod
         }
         
 
+        /// <summary>
+        /// F2键 - 复制所有队友（保存快照）
+        /// </summary>
+        private void CopyAllies()
+        {
+            try
+            {
+                if (allies.Count == 0)
+                {
+                    ShowPlayerBubble("没有队友需要复制", 2f);
+                    Debug.Log("⚠️ [复制队友] 当前没有队友");
+                    return;
+                }
+                
+                savedAllySnapshots.Clear();
+                
+                foreach (var ally in allies)
+                {
+                    if (ally == null || ally.gameObject == null) continue;
+                    
+                    try
+                    {
+                        var snapshot = CaptureAllySnapshot(ally);
+                        savedAllySnapshots.Add(snapshot);
+                        Debug.Log($"✅ [复制队友] 已复制: {ally.gameObject.name}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogError($"❌ [复制队友] 复制失败: {ally.gameObject.name}, 错误: {ex.Message}");
+                    }
+                }
+                
+                ShowPlayerBubble($"已复制 {savedAllySnapshots.Count} 名队友", 2f);
+                Debug.Log($"✅ [复制队友] 共复制 {savedAllySnapshots.Count} 名队友");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"❌ [复制队友] 复制过程出错: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// 采集队友快照
+        /// </summary>
+        private AllySnapshot CaptureAllySnapshot(CharacterMainControl ally)
+        {
+            var snapshot = new AllySnapshot();
+            
+            // 1. 基础信息
+            snapshot.position = ally.transform.position;
+            snapshot.rotation = ally.transform.rotation;
+            snapshot.team = ally.Team;
+            
+            // 2. 外观数据
+            try
+            {
+                Type charType = ally.GetType();
+                
+                // 获取characterModel
+                PropertyInfo modelProp = charType.GetProperty("characterModel", BindingFlags.Public | BindingFlags.Instance);
+                if (modelProp != null)
+                {
+                    object modelObj = modelProp.GetValue(ally);
+                    if (modelObj != null)
+                    {
+                        Type modelType = modelObj.GetType();
+                        PropertyInfo nameProp = modelType.GetProperty("name", BindingFlags.Public | BindingFlags.Instance);
+                        if (nameProp != null)
+                        {
+                            string modelName = nameProp.GetValue(modelObj)?.ToString() ?? "";
+                            // 去除Clone后缀
+                            snapshot.modelName = modelName.Replace("(Clone)", "").Trim();
+                        }
+                    }
+                }
+                
+                // 获取characterPreset
+                PropertyInfo presetProp = charType.GetProperty("characterPreset", BindingFlags.Public | BindingFlags.Instance);
+                if (presetProp != null)
+                {
+                    object presetObj = presetProp.GetValue(ally);
+                    if (presetObj != null)
+                    {
+                        Type presetType = presetObj.GetType();
+                        PropertyInfo presetNameProp = presetType.GetProperty("name", BindingFlags.Public | BindingFlags.Instance);
+                        if (presetNameProp != null)
+                        {
+                            snapshot.characterPresetName = presetNameProp.GetValue(presetObj)?.ToString() ?? "";
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"⚠️ [复制队友] 采集外观数据失败: {ex.Message}");
+            }
+            
+            // 3. 血量数据
+            try
+            {
+                PropertyInfo healthProp = ally.GetType().GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
+                if (healthProp != null)
+                {
+                    object healthObj = healthProp.GetValue(ally);
+                    if (healthObj != null)
+                    {
+                        Type healthType = healthObj.GetType();
+                        PropertyInfo currentHealthProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
+                        PropertyInfo maxHealthProp = healthType.GetProperty("MaxHealth", BindingFlags.Public | BindingFlags.Instance);
+                        
+                        if (currentHealthProp != null)
+                        {
+                            object currentValue = currentHealthProp.GetValue(healthObj);
+                            if (currentValue != null)
+                                snapshot.currentHealth = Convert.ToSingle(currentValue);
+                        }
+                        
+                        if (maxHealthProp != null)
+                        {
+                            object maxValue = maxHealthProp.GetValue(healthObj);
+                            if (maxValue != null)
+                                snapshot.maxHealth = Convert.ToSingle(maxValue);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"⚠️ [复制队友] 采集血量数据失败: {ex.Message}");
+            }
+            
+            // 4. 装备数据（简化：只保存TypeID，需要时重新生成）
+            snapshot.equipmentTypeIds = new List<int>();
+            // 注意：装备数据采集较复杂，这里先留空，后续可以扩展
+            
+            // 5. 武器数据
+            snapshot.weaponList = new List<(int, int)>();
+            // 注意：武器数据采集较复杂，这里先留空，后续可以扩展
+            
+            return snapshot;
+        }
+        
+        /// <summary>
+        /// F3键 - 重建队友（从快照恢复）
+        /// </summary>
+        private void RestoreAllies()
+        {
+            try
+            {
+                if (savedAllySnapshots == null || savedAllySnapshots.Count == 0)
+                {
+                    ShowPlayerBubble("没有保存的队友数据", 2f);
+                    Debug.Log("⚠️ [重建队友] 没有保存的队友快照");
+                    return;
+                }
+                
+                // 检查友军数量上限
+                int currentAllyCount = allies.Count(ally => ally != null && ally.gameObject != null);
+                if (currentAllyCount + savedAllySnapshots.Count > maxAllyCount)
+                {
+                    ShowPlayerBubble($"队伍已满，无法重建（当前{currentAllyCount}名，上限{maxAllyCount}名）", 2f);
+                    Debug.LogWarning($"⚠️ [重建队友] 队伍已满，无法重建");
+                    return;
+                }
+                
+                Debug.Log($"🔄 [重建队友] 开始重建 {savedAllySnapshots.Count} 名队友");
+                
+                foreach (var snapshot in savedAllySnapshots)
+                {
+                    try
+                    {
+                        RestoreAllyFromSnapshot(snapshot).Forget();
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogError($"❌ [重建队友] 重建失败: {ex.Message}");
+                    }
+                }
+                
+                ShowPlayerBubble($"正在重建 {savedAllySnapshots.Count} 名队友...", 2f);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"❌ [重建队友] 重建过程出错: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// 从快照重建队友
+        /// </summary>
+        private async UniTask RestoreAllyFromSnapshot(AllySnapshot snapshot)
+        {
+            try
+            {
+                // 延迟一小段时间，避免一次性创建过多对象
+                await UniTask.Delay(100);
+                
+                // 1. 获取玩家位置（在玩家附近生成）
+                CharacterMainControl? player = GetOrFindPlayerCached();
+                if (player == null)
+                {
+                    Debug.LogError("❌ [重建队友] 未找到玩家对象");
+                    return;
+                }
+                
+                Vector3 spawnPos = player.transform.position + UnityEngine.Random.insideUnitSphere * 3f;
+                spawnPos.y = player.transform.position.y; // 保持相同高度
+                
+                // 2. 查找角色预设（优先使用保存的预设名称）
+                GameObject allyPrefab = null;
+                
+                if (!string.IsNullOrEmpty(snapshot.characterPresetName))
+                {
+                    // 尝试通过预设名称查找
+                    // 注意：这里需要根据实际API调整
+                }
+                
+                if (allyPrefab == null && !string.IsNullOrEmpty(snapshot.modelName))
+                {
+                    // 尝试通过模型名称查找
+                    // 注意：这里需要根据实际API调整
+                }
+                
+                // 3. 如果找不到预设，使用现有队友作为模板（如果有）
+                if (allyPrefab == null && allies.Count > 0)
+                {
+                    var existingAlly = allies.FirstOrDefault(a => a != null && a.gameObject != null);
+                    if (existingAlly != null)
+                    {
+                        allyPrefab = existingAlly.gameObject;
+                    }
+                }
+                
+                // 4. 创建队友对象
+                GameObject allyInstance = null;
+                if (allyPrefab != null)
+                {
+                    allyInstance = UnityEngine.Object.Instantiate(allyPrefab, spawnPos, snapshot.rotation);
+                }
+                else
+                {
+                    // 最后兜底：尝试从场景中查找一个NPC作为模板
+                    CharacterMainControl[] allCharacters = FindObjectsOfType<CharacterMainControl>();
+                    CharacterMainControl templateNPC = allCharacters.FirstOrDefault(c => 
+                        c != null && 
+                        c != player && 
+                        !IsAlly(c) &&
+                        c.Team != player.Team);
+                    
+                    if (templateNPC != null)
+                    {
+                        allyInstance = UnityEngine.Object.Instantiate(templateNPC.gameObject, spawnPos, snapshot.rotation);
+                    }
+                    else
+                    {
+                        Debug.LogError("❌ [重建队友] 无法找到合适的模板对象");
+                        return;
+                    }
+                }
+                
+                if (allyInstance == null)
+                {
+                    Debug.LogError("❌ [重建队友] 创建对象失败");
+                    return;
+                }
+                
+                var newAlly = allyInstance.GetComponent<CharacterMainControl>();
+                if (newAlly == null)
+                {
+                    Debug.LogError("❌ [重建队友] 创建的对象缺少CharacterMainControl组件");
+                    UnityEngine.Object.Destroy(allyInstance);
+                    return;
+                }
+                
+                // 5. 设置位置和旋转
+                allyInstance.transform.SetPositionAndRotation(snapshot.position, snapshot.rotation);
+                
+                // 6. 转换阵营
+                if (!TryGetPlayerTeam(out Teams playerTeam))
+                {
+                    Debug.LogError("❌ [重建队友] 无法获取玩家队伍");
+                    UnityEngine.Object.Destroy(allyInstance);
+                    return;
+                }
+                
+                newAlly.SetTeam(playerTeam);
+                
+                // 7. 设置血量
+                try
+                {
+                    PropertyInfo healthProp = newAlly.GetType().GetProperty("Health", BindingFlags.Public | BindingFlags.Instance);
+                    if (healthProp != null)
+                    {
+                        object healthObj = healthProp.GetValue(newAlly);
+                        if (healthObj != null && snapshot.maxHealth > 0)
+                        {
+                            Type healthType = healthObj.GetType();
+                            PropertyInfo currentHealthProp = healthType.GetProperty("CurrentHealth", BindingFlags.Public | BindingFlags.Instance);
+                            PropertyInfo maxHealthProp = healthType.GetProperty("MaxHealth", BindingFlags.Public | BindingFlags.Instance);
+                            
+                            if (maxHealthProp != null && maxHealthProp.CanWrite)
+                            {
+                                maxHealthProp.SetValue(healthObj, snapshot.maxHealth);
+                            }
+                            
+                            if (currentHealthProp != null && currentHealthProp.CanWrite)
+                            {
+                                currentHealthProp.SetValue(healthObj, snapshot.currentHealth);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"⚠️ [重建队友] 设置血量失败: {ex.Message}");
+                }
+                
+                // 8. 添加到友军列表
+                if (!allies.Contains(newAlly))
+                {
+                    allies.Add(newAlly);
+                }
+                
+                // 9. 设置AI跟随（调用现有的SetupAllyAI方法）
+                SetupAllyAI(newAlly, player);
+                
+                Debug.Log($"✅ [重建队友] 重建成功: {newAlly.gameObject.name}");
+                ShowCharacterBubble(newAlly, "我回来了！", 2f);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"❌ [重建队友] 重建过程出错: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+        
         void OnDestroy()
         {
             Debug.Log("=== 雇佣兵系统Mod 已卸载 ===");
