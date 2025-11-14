@@ -46,6 +46,9 @@ namespace DuckovMercenarySystemMod
         private List<CharacterMainControl> allies = new List<CharacterMainControl>();
         private int maxAllyCount = 2;               // 友军上限
         
+        // 缓存玩家对象（避免重复获取）
+        private CharacterMainControl? cachedPlayer = null;
+        
         // AI状态重置冷却时间（避免频繁重置）
         private Dictionary<CharacterMainControl, float> lastResetTime = new Dictionary<CharacterMainControl, float>();
         private float resetCooldown = 2f;          // 重置冷却时间（秒）
@@ -270,7 +273,7 @@ namespace DuckovMercenarySystemMod
                 }
                 
                 int count = allies.Count;
-                CharacterMainControl player = GetOrFindPlayer();
+                CharacterMainControl? player = GetOrFindPlayerCached();
                 Teams originalTeam = Teams.scav; // 默认恢复到scav阵营
                 
                 // 清理无效的友军
@@ -323,22 +326,8 @@ namespace DuckovMercenarySystemMod
         /// </summary>
         public CharacterMainControl GetOrFindPlayer()
         {
-            GameObject playerObj = GetPlayerObject();
-            if (playerObj != null)
-            {
-                CharacterMainControl player = playerObj.GetComponent<CharacterMainControl>();
-                if (player != null)
-                {
-                    // 更新玩家队伍缓存
-                    if (!hasCachedPlayerTeam)
-                    {
-                        CachePlayerTeam(player);
-                    }
-                    return player;
-                }
-            }
-
-            return null;
+            CharacterMainControl? player = GetOrFindPlayerCached();
+            return player ?? null;
         }
         
         /// <summary>
@@ -539,7 +528,79 @@ namespace DuckovMercenarySystemMod
         }
         
         /// <summary>
-        /// 统计玩家背包中的金币数量（公共方法，供DebugFeatures使用）
+        /// 从玩家对象获取Inventory中的所有金币物品（优化版：避免遍历场景中所有Item）
+        /// </summary>
+        private List<Item> GetPlayerCoinItems(CharacterMainControl player)
+        {
+            try
+            {
+                if (player == null || player.gameObject == null)
+                {
+                    return new List<Item>();
+                }
+                
+                // 1. 直接通过GetComponent获取CharacterItemControl组件（更可靠）
+                Component itemControlComponent = player.gameObject.GetComponent("CharacterItemControl");
+                if (itemControlComponent == null)
+                {
+                    Debug.LogWarning("❌ 未找到CharacterItemControl组件");
+                    return new List<Item>();
+                }
+                
+                // 2. 获取Inventory（先尝试属性，再尝试字段）
+                Type itemControlType = itemControlComponent.GetType();
+                object inventoryObj = null;
+                
+                // 获取Inventory属性
+                PropertyInfo inventoryProp = itemControlType.GetProperty("inventory", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+                if (inventoryProp == null)
+                {
+                    Debug.LogWarning($"❌ 未找到CharacterItemControl的inventory属性 (类型: {itemControlType.Name})");
+                    return new List<Item>();
+                }
+                
+                inventoryObj = inventoryProp.GetValue(itemControlComponent);
+                
+                // 3. 获取Content属性（List<Item>）
+                Type inventoryType = inventoryObj.GetType();
+                PropertyInfo contentProp = inventoryType.GetProperty("Content", BindingFlags.Public | BindingFlags.Instance);
+                if (contentProp == null)
+                {
+                    Debug.LogWarning($"❌ 未找到Inventory的Content属性 (类型: {inventoryType.Name})");
+                    return new List<Item>();
+                }
+                
+                object contentObj = contentProp.GetValue(inventoryObj);
+                if (contentObj == null)
+                {
+                    return new List<Item>(); // 背包为空
+                }
+                
+                // 4. 转换为List<Item>并筛选金币
+                if (contentObj is System.Collections.IEnumerable contentList)
+                {
+                    List<Item> coinItems = new List<Item>();
+                    foreach (object itemObj in contentList)
+                    {
+                        if (itemObj is Item item && item != null && item.TypeID == ITEM_ID_COIN)
+                        {
+                            coinItems.Add(item);
+                        }
+                    }
+                    return coinItems;
+                }
+                
+                return new List<Item>();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"从玩家Inventory获取金币时出错: {ex.Message}\n{ex.StackTrace}");
+                return new List<Item>();
+            }
+        }
+        
+        /// <summary>
+        /// 统计玩家背包中的金币数量（优化版：直接从玩家Inventory获取，避免遍历所有Item）
         /// </summary>
         public int CountPlayerCoins(CharacterMainControl player)
         {
@@ -547,16 +608,12 @@ namespace DuckovMercenarySystemMod
             {
                 int totalCoins = 0;
                 
-                // 找到场景中所有的Item
-                Item[] allItems = FindObjectsOfType<Item>();
+                // 优化：直接从玩家Inventory获取金币物品
+                List<Item> coinItems = GetPlayerCoinItems(player);
                 
-                // 筛选出在玩家身上的金币
-                foreach (Item item in allItems)
+                foreach (Item item in coinItems)
                 {
-                    if (item == null) continue;
-                    
-                    // 检查是否在玩家身上 且 是金币
-                    if (item.IsInPlayerCharacter() && item.TypeID == ITEM_ID_COIN)
+                    if (item != null)
                     {
                         int itemAmount = GetItemAmount(item);
                         totalCoins += itemAmount;
@@ -1052,19 +1109,6 @@ namespace DuckovMercenarySystemMod
                         CharacterMainControl charControl = playerTransform.GetComponent<CharacterMainControl>();
                         if (charControl != null)
                         {
-                            // 验证IsMainCharacter属性
-                            Type charType = charControl.GetType();
-                            PropertyInfo isMainCharProp = charType.GetProperty("IsMainCharacter", BindingFlags.Public | BindingFlags.Instance);
-                            if (isMainCharProp != null)
-                            {
-                                object isMainValue = isMainCharProp.GetValue(charControl);
-                                if (isMainValue != null && Convert.ToBoolean(isMainValue))
-                                {
-                                    Debug.Log($"[GetPlayerObject] ✅ 通过路径找到主玩家: {playerTransform.name} (ID: {charControl.GetInstanceID()})");
-                                    return playerTransform.gameObject;
-                                }
-                            }
-                            
                             // 备选：检查Team属性
                             if (charControl.Team.ToString().ToLower() == "player")
                             {
@@ -1120,16 +1164,50 @@ namespace DuckovMercenarySystemMod
         }
 
         /// <summary>
-        /// 判断角色是否已经是友军
+        /// 判断角色是否已经是友军（优化版：使用缓存的玩家队伍）
         /// </summary>
         private bool IsAlly(CharacterMainControl character)
         {
-            CharacterMainControl player = GetOrFindPlayer();
-            if (player == null) return false;
-
-            // 检查是否和玩家同队
-            if (!TryGetPlayerTeam(out Teams playerTeam)) return false;
-            return character.Team == playerTeam;
+            // 优化：使用缓存的玩家队伍，避免重复获取玩家
+            if (!hasCachedPlayerTeam)
+            {
+                CharacterMainControl player = GetOrFindPlayerCached();
+                if (player == null) return false;
+                cachedPlayerTeam = player.Team;
+                hasCachedPlayerTeam = true;
+            }
+            
+            return character.Team == cachedPlayerTeam;
+        }
+        
+        /// <summary>
+        /// 获取或查找玩家角色（使用缓存，避免重复查找）
+        /// </summary>
+        private CharacterMainControl? GetOrFindPlayerCached()
+        {
+            // 如果缓存有效，直接返回
+            if (cachedPlayer != null && cachedPlayer.gameObject != null && cachedPlayer.gameObject)
+            {
+                return cachedPlayer;
+            }
+            
+            // 缓存无效，重新查找
+            GameObject? playerObj = GetPlayerObject();
+            if (playerObj != null)
+            {
+                CharacterMainControl? player = playerObj.GetComponent<CharacterMainControl>();
+                if (player != null)
+                {
+                    cachedPlayer = player;
+                    // 同时更新队伍缓存
+                    cachedPlayerTeam = player.Team;
+                    hasCachedPlayerTeam = true;
+                    return player;
+                }
+            }
+            
+            cachedPlayer = null;
+            return null;
         }
 
         /// <summary>
@@ -1341,13 +1419,13 @@ namespace DuckovMercenarySystemMod
         }
 
         /// <summary>
-        /// 检查玩家金钱是否足够
+        /// 检查玩家金钱是否足够（优化版：使用缓存的玩家对象）
         /// </summary>
         private bool HasEnoughMoney(int amount)
         {
             try
             {
-                CharacterMainControl player = GetOrFindPlayer();
+                CharacterMainControl? player = GetOrFindPlayerCached();
                 if (player == null)
                 {
                     Debug.LogWarning("❌ 未找到玩家，无法检查金钱");
@@ -1370,13 +1448,13 @@ namespace DuckovMercenarySystemMod
 
 
         /// <summary>
-        /// 扣除玩家金钱并转移给目标角色
+        /// 扣除玩家金钱并转移给目标角色（优化版：使用缓存的玩家对象）
         /// </summary>
         private void DeductMoney(int amount, CharacterMainControl targetEnemy)
         {
             try
             {
-                CharacterMainControl player = GetOrFindPlayer();
+                CharacterMainControl? player = GetOrFindPlayerCached();
                 if (player == null)
                 {
                     Debug.LogWarning("❌ 未找到玩家，无法扣除金钱");
@@ -1405,7 +1483,7 @@ namespace DuckovMercenarySystemMod
         }
 
         /// <summary>
-        /// 从玩家背包移除指定数量的金币（使用ItemUtilities API）
+        /// 从玩家背包移除指定数量的金币（优化版：直接从玩家Inventory获取物品，避免遍历所有Item）
         /// </summary>
         private bool RemovePlayerCoins(CharacterMainControl player, int amount)
         {
@@ -1413,17 +1491,12 @@ namespace DuckovMercenarySystemMod
             {
                 int remaining = amount;
                 
-                // 找到场景中所有的Item
-                Item[] allItems = FindObjectsOfType<Item>();
-                
-                // 收集玩家身上的所有金币
-                List<Item> coinItems = new List<Item>();
-                foreach (Item item in allItems)
+                // 优化：直接从玩家对象获取Inventory，避免遍历场景中所有Item
+                List<Item> coinItems = GetPlayerCoinItems(player);
+                if (coinItems == null || coinItems.Count == 0)
                 {
-                    if (item != null && item.IsInPlayerCharacter() && item.TypeID == ITEM_ID_COIN)
-                    {
-                        coinItems.Add(item);
-                    }
+                    Debug.LogWarning("❌ 玩家背包中没有金币");
+                    return false;
                 }
                 
                 // 从金币物品中扣除
@@ -1516,7 +1589,7 @@ namespace DuckovMercenarySystemMod
                 if (success)
                 {
                     Debug.Log($"✅ [GiveCoinsToCharacter] 成功给 {character.gameObject.name} 添加 {amount} 金币");
-                    CheckCharacterCoinsAfterDelay(character, amount, 1f).Forget();
+                    // CheckCharacterCoinsAfterDelay(character, amount, 1f).Forget();
                 }
                 else
                 {
@@ -1556,35 +1629,27 @@ namespace DuckovMercenarySystemMod
         }
         
         /// <summary>
-        /// 统计角色身上的金币数量
+        /// 统计角色身上的金币数量（优化版：直接从角色Inventory获取）
         /// </summary>
         private int CountCharacterCoins(CharacterMainControl character)
         {
             try
             {
-                int totalCoins = 0;
-                
-                // 找到场景中所有的Item
-                Item[] allItems = FindObjectsOfType<Item>();
-                
-                // 筛选出在角色身上的金币
-                foreach (Item item in allItems)
+                if (character == null || character.gameObject == null)
                 {
-                    if (item == null) continue;
-                    
-                    // 检查是否在角色身上 且 是金币
-                    // 注意：这里需要根据实际API判断物品是否在角色身上
-                    // 可能需要使用不同的方法，比如检查item的持有者
-                    if (item.TypeID == ITEM_ID_COIN)
+                    return 0;
+                }
+                
+                // 使用与玩家相同的方法：直接从Inventory获取
+                List<Item> coinItems = GetPlayerCoinItems(character);
+                
+                int totalCoins = 0;
+                foreach (Item item in coinItems)
+                {
+                    if (item != null)
                     {
-                        // 尝试通过距离判断（临时方案）
-                        float distance = Vector3.Distance(item.transform.position, character.transform.position);
-                        if (distance < 2f) // 如果物品在角色附近2米内，认为可能在角色身上
-                        {
-                            int itemAmount = GetItemAmount(item);
-                            totalCoins += itemAmount;
-                            Debug.Log($"   📦 发现金币物品: {item.gameObject.name}, 数量: {itemAmount}, 距离: {distance:F2}米");
-                        }
+                        int itemAmount = GetItemAmount(item);
+                        totalCoins += itemAmount;
                     }
                 }
                 
