@@ -21,6 +21,14 @@ namespace DuckovMercenarySystemMod
         private int maxRequiredAmount = 800;      // 每个敌人最高报价
         private float bribeRange = 4f;             // 贿赂范围（米）- 俯视图游戏用靠近方式
         
+        // 敌人查找方法选择
+        private enum EnemyFindMethod
+        {
+            FindObjectsOfType,  // 方法1：遍历所有角色（性能开销大，但更可靠）
+            PhysicsOverlap      // 方法2：使用物理查询（性能好，但需要碰撞体）
+        }
+        private EnemyFindMethod enemyFindMethod = EnemyFindMethod.PhysicsOverlap; // 默认使用方法1
+        
         // 按键配置（支持改键）
         private KeyCode bribeKey = KeyCode.E;      // 贿赂按键（默认E）
         private KeyCode dismissKey = KeyCode.Q;    // 解散按键（默认Q）
@@ -878,6 +886,68 @@ namespace DuckovMercenarySystemMod
         }
 
         /// <summary>
+        /// 查找附近的敌人（提供两种方法可选）
+        /// </summary>
+        /// <param name="playerPos">玩家位置</param>
+        /// <param name="playerObj">玩家对象</param>
+        /// <param name="range">查找范围（米）</param>
+        /// <param name="method">查找方法</param>
+        /// <returns>附近的敌人列表</returns>
+        private List<CharacterMainControl> FindNearbyEnemies(Vector3 playerPos, GameObject playerObj, float range, EnemyFindMethod method)
+        {
+            List<CharacterMainControl> nearbyEnemies = new List<CharacterMainControl>();
+            
+            try
+            {
+                if (method == EnemyFindMethod.FindObjectsOfType)
+                {
+                    // 方法1：遍历所有角色，然后按距离筛选（性能开销大，但更可靠，不依赖碰撞体）
+                    CharacterMainControl[] allCharacters = FindObjectsOfType<CharacterMainControl>();
+                    
+                    foreach (CharacterMainControl character in allCharacters)
+                    {
+                        if (character == null || character.gameObject == null) continue;
+                        if (character.gameObject == playerObj) continue;
+                        if (IsAlly(character)) continue;
+                        
+                        float distance = Vector3.Distance(playerPos, character.transform.position);
+                        if (distance <= range)
+                        {
+                            nearbyEnemies.Add(character);
+                            Debug.Log($"🎯 [方法1] 发现敌人: {character.gameObject.name} (距离: {distance:F2}米)");
+                        }
+                    }
+                }
+                else if (method == EnemyFindMethod.PhysicsOverlap)
+                {
+                    // 方法2：使用Physics.OverlapSphere查找范围内的碰撞体（性能好，但需要碰撞体）
+                    Collider[] colliders = Physics.OverlapSphere(playerPos, range);
+                    
+                    foreach (Collider collider in colliders)
+                    {
+                        if (collider == null || collider.gameObject == null) continue;
+                        if (collider.gameObject == playerObj) continue;
+                        
+                        // 获取CharacterMainControl组件
+                        CharacterMainControl character = collider.GetComponent<CharacterMainControl>();
+                        if (character == null) continue;
+                        if (IsAlly(character)) continue;
+                        
+                        float distance = Vector3.Distance(playerPos, character.transform.position);
+                        nearbyEnemies.Add(character);
+                        Debug.Log($"🎯 [方法2] 发现敌人: {character.gameObject.name} (距离: {distance:F2}米)");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"查找附近敌人时出错: {ex.Message}\n{ex.StackTrace}");
+            }
+            
+            return nearbyEnemies;
+        }
+        
+        /// <summary>
         /// 尝试贿赂敌人（俯视图游戏，使用距离检测）
         /// </summary>
         private void TryBribeEnemy()
@@ -916,23 +986,8 @@ namespace DuckovMercenarySystemMod
                 Vector3 playerPos = playerObj.transform.position;
                 Debug.Log($"📍 [TryBribeEnemy] 玩家位置: {playerPos}");
 
-                // 2. 直接查找所有角色，然后按距离筛选（更可靠，不依赖碰撞体）
-                CharacterMainControl[] allCharacters = FindObjectsOfType<CharacterMainControl>();
-                List<CharacterMainControl> nearbyEnemies = new List<CharacterMainControl>();
-                
-                foreach (CharacterMainControl character in allCharacters)
-                {
-                    if (character == null || character.gameObject == null) continue;
-                    if (character.gameObject == playerObj) continue;
-                    if (IsAlly(character)) continue;
-                    
-                    float distance = Vector3.Distance(playerPos, character.transform.position);
-                    if (distance <= bribeRange)
-                    {
-                        nearbyEnemies.Add(character);
-                        Debug.Log($"🎯 发现敌人: {character.gameObject.name} (距离: {distance:F2}米)");
-                    }
-                }
+                // 2. 查找附近的敌人（使用封装的方法）
+                List<CharacterMainControl> nearbyEnemies = FindNearbyEnemies(playerPos, playerObj, bribeRange, enemyFindMethod);
 
                 // 4. 如果没有敌人
                 if (nearbyEnemies.Count == 0)

@@ -6,11 +6,13 @@
 	"visibility"		"0"
 	"publishedfileid"		"3603772847"
 	"title"		"Hire two teammates-雇两个保镖吧"
-	"changenote"		"支付的钱进入敌人口袋，后续还能拿回来；队友紧跟玩家步伐"
+	"changenote"		"性能优化"
 	"description"		"主要功能：
 	贴脸敌人，按E键使用背包里的现金雇佣。
 	按Q键解除所有雇佣关系。
 
+	E/Q用不惯？按F10设置键位
+	
 	注意事项：
 	1.出门记得带现金，否则没朋友
 	2.按E键每成功一次仅支付100元现金
